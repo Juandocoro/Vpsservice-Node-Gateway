@@ -1888,6 +1888,24 @@ node_install() {
     ui_pause
 }
 
+# El endpoint es la direccion PUBLICA del VPS, por la que se llega a
+# el desde Internet. Poner ahi su direccion dentro del tunel
+# (10.77.77.1) es un error facil de cometer y que luego no se ve:
+# el tunel no puede transportarse a si mismo.
+_node_check_endpoint_host() {
+    case "$1" in
+        10.77.77.*)
+            ui_blank
+            ui_err "Esa es una direccion DE DENTRO del tunel."
+            echo -e "${UI_PAD}${DM}   ${NODE_VPS_WGIP} es el VPS visto desde dentro del tunel,${CR}"
+            echo -e "${UI_PAD}${DM}   y solo existe una vez el tunel esta levantado.${CR}"
+            echo -e "${UI_PAD}${DM}   Aqui va su IP publica, la de Internet: la misma por${CR}"
+            echo -e "${UI_PAD}${DM}   la que entras por SSH al servidor.${CR}"
+            return 1 ;;
+    esac
+    return 0
+}
+
 node_install_wireguard() {
     ui_info "Preparando modo WireGuard..."
     _node_ensure_wg_tools || { ui_err "No se pudo instalar wireguard-tools."; ui_pause; return 1; }
@@ -1903,9 +1921,11 @@ node_install_wireguard() {
     echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL ▸ [5] CLAVE PUBLICA DEL VPS${CR}"
     ui_blank
 
-    ui_ask "IP publica o dominio del VPS" "$CFG_VPS_HOST"
-    CFG_VPS_HOST="$REPLY_UI"
-    [ -z "$CFG_VPS_HOST" ] && { ui_err "Sin host no hay nodo."; ui_pause; return 1; }
+    until ui_ask "IP publica o dominio del VPS" "$CFG_VPS_HOST"; \
+          CFG_VPS_HOST="$REPLY_UI"; \
+          [ -n "$CFG_VPS_HOST" ] && _node_check_endpoint_host "$CFG_VPS_HOST"; do
+        [ -z "$CFG_VPS_HOST" ] && { ui_err "Sin host no hay nodo."; ui_pause; return 1; }
+    done
 
     ui_ask "Puerto WireGuard del VPS" "$NODE_DEFAULT_PORT"
     CFG_VPS_PORT="$REPLY_UI"
@@ -2414,7 +2434,8 @@ node_menu() {
                 ui_section "DATOS DEL VPS" "reconfigurar sin perder las claves"
                 ui_blank
                 if [ "$CFG_MODE" = "wireguard" ]; then
-                    ui_ask "IP o dominio del VPS" "$CFG_VPS_HOST"; CFG_VPS_HOST="$REPLY_UI"
+                    ui_ask "IP o dominio del VPS" "$CFG_VPS_HOST"
+                    if _node_check_endpoint_host "$REPLY_UI"; then CFG_VPS_HOST="$REPLY_UI"; else ui_pause; continue; fi
                     ui_ask "Puerto WireGuard" "$CFG_VPS_PORT";     CFG_VPS_PORT="$REPLY_UI"
                     ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"; CFG_VPS_PUBKEY="$REPLY_UI"
                     ui_ask "IP de este nodo" "$NODE_SELF_WGIP"
