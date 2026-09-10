@@ -140,6 +140,30 @@ script no borra las claves ya registradas en el VPS.
 Si ya hay configuración, `nodo` la adopta y abre el menú directamente; el
 asistente sólo aparece la primera vez.
 
+### Equipos configurados a mano
+
+Antes de este script la contraparte se montaba a mano: claves en
+`/etc/wireguard/home_private.key`, config en `wg-home.conf` y el servicio
+`wg-quick@wg-home`. **Un equipo así ya es un nodo**, y el script lo reconoce.
+
+La detección no busca su propio fichero de configuración —eso daría un falso
+negativo— sino **la huella del protocolo: una interfaz WireGuard cuya dirección
+es `10.77.77.2`**. Da igual cómo se llame el fichero. También cuenta como
+evidencia una unidad `wg-quick@wg-home` activa o la interfaz levantada.
+
+Al encontrarlo, el script enseña lo que hay y ofrece adoptarlo. Adoptar significa:
+
+- **reutiliza tus claves**, nunca las regenera — son las que el VPS tiene
+  registradas, y unas nuevas romperían el peer;
+- **no reescribe tu `wg-home.conf`**: es tuyo y puede llevar ajustes propios
+  (`DNS`, `PostUp`, `MTU`). Los cambios de endpoint se aplican con `wg set`,
+  que toca sólo ese campo;
+- **respeta `wg-quick`** si ya gestiona la interfaz, en lugar de crear una
+  segunda por su cuenta — dos gestores sobre la misma interfaz se pisan;
+- **no duplica el NAT** si ya hay un `masquerade` puesto por nftables o por ti.
+
+Puedes decir que no y conservar tu montaje intacto.
+
 ---
 
 ## Detalles que suelen morder

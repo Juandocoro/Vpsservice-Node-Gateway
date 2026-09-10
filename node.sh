@@ -452,6 +452,9 @@ CFG_SSH_USER=""    # usuario SSH del VPS (modo B)
 CFG_SOCKS_PORT=""  # puerto SOCKS que se publica en el VPS (modo B)
 CFG_AUTOSTART=""   # on | off
 CFG_DEVICE=""      # etiqueta con la que se instalo
+CFG_WG_CONF=""     # ruta del .conf de WireGuard realmente en uso
+CFG_WG_MANAGER=""  # wg-quick | manual — quien manda sobre la interfaz
+CFG_ADOPTED=""     # si | no — venia de una instalacion previa a mano
 
 _node_cfg_get() {
     local key="$1"
@@ -469,6 +472,27 @@ node_cfg_load() {
     CFG_SOCKS_PORT=$(_node_cfg_get SOCKS_PORT)
     CFG_AUTOSTART=$(_node_cfg_get AUTOSTART)
     CFG_DEVICE=$(_node_cfg_get DEVICE)
+    CFG_WG_CONF=$(_node_cfg_get WG_CONF)
+    CFG_WG_MANAGER=$(_node_cfg_get WG_MANAGER)
+    CFG_ADOPTED=$(_node_cfg_get ADOPTED)
+
+    # Un nodo adoptado usa el .conf que ya tenia, no el nuestro.
+    [ -n "$CFG_WG_CONF" ] && NODE_WGCONF="$CFG_WG_CONF"
+    [ -z "$CFG_WG_MANAGER" ] && CFG_WG_MANAGER="manual"
+
+    # Lo mismo con las claves: si el conf adoptado vive en otro
+    # sitio, las claves del metodo manual estan junto a el.
+    if [ -n "$CFG_WG_CONF" ] && [ ! -f "$NODE_PRIV" ]; then
+        local d k
+        d=$(dirname "$CFG_WG_CONF")
+        for k in home_private.key wghome_private.key node_private.key privatekey; do
+            [ -f "$d/$k" ] && { NODE_PRIV="$d/$k"; break; }
+        done
+        for k in home_public.key wghome_public.key node_public.key publickey; do
+            [ -f "$d/$k" ] && { NODE_PUB="$d/$k"; break; }
+        done
+    fi
+
     [ -n "$CFG_MODE" ]
 }
 
@@ -486,11 +510,207 @@ VPS_PUBKEY=${CFG_VPS_PUBKEY}
 SSH_USER=${CFG_SSH_USER}
 SOCKS_PORT=${CFG_SOCKS_PORT}
 AUTOSTART=${CFG_AUTOSTART}
+WG_CONF=${CFG_WG_CONF}
+WG_MANAGER=${CFG_WG_MANAGER}
+ADOPTED=${CFG_ADOPTED}
 EOF
     chmod 600 "$NODE_CONF" 2>/dev/null
 }
 
 node_is_configured() { [ -f "$NODE_CONF" ] && [ -n "$(_node_cfg_get MODE)" ]; }
+
+# =========================================================
+# DETECCION DE NODOS YA CONFIGURADOS
+# ---------------------------------------------------------
+# Antes de este script la contraparte se montaba a mano: claves
+# en /etc/wireguard/home_private.key, conf en wg-home.conf y el
+# servicio wg-quick@wg-home. Un equipo asi YA ES UN NODO, y
+# tratarlo como virgen seria destructivo: regenerar las claves
+# invalidaria el peer que el VPS ya tiene registrado.
+#
+# Por eso no se busca "nuestro" fichero de configuracion, sino
+# la huella del protocolo: una interfaz WireGuard cuya direccion
+# es 10.77.77.2. Eso es lo que define a un nodo, se haya creado
+# como se haya creado.
+# =========================================================
+
+EX_WGCONF=""      # conf de WireGuard encontrado
+EX_PRIV=""        # fichero de clave privada en uso
+EX_PUB=""         # fichero de clave publica
+EX_PEER_PUB=""    # clave publica del VPS leida del conf
+EX_ENDPOINT=""    # host:puerto del VPS
+EX_ADDRESS=""     # direccion de la interfaz
+EX_UNIT=""        # wg-quick@wg-home: enabled / active / ""
+EX_IFACE=""       # up si la interfaz existe ahora mismo
+EX_NAT=""         # iptables / nft / ""
+
+# Lee un campo de un .conf de WireGuard. Nunca se usa para
+# mostrar la clave privada: solo para saber si existe.
+_wg_conf_get() {
+    local file="$1" key="$2"
+    [ -r "$file" ] || { _root_run "cat '$file' 2>/dev/null" 2>/dev/null | sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" | head -1; return; }
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null | head -1
+}
+
+# ¿Este .conf describe a un nodo de salida de nuestro protocolo?
+# La prueba es la direccion 10.77.77.2, no el nombre del fichero.
+_wg_conf_is_node() {
+    local file="$1" addr
+    addr=$(_wg_conf_get "$file" "Address")
+    [ -n "$addr" ] && [[ "$addr" == ${NODE_SELF_WGIP}/* || "$addr" == "$NODE_SELF_WGIP" ]]
+}
+
+_node_scan_existing() {
+    EX_WGCONF=""; EX_PRIV=""; EX_PUB=""; EX_PEER_PUB=""
+    EX_ENDPOINT=""; EX_ADDRESS=""; EX_UNIT=""; EX_IFACE=""; EX_NAT=""
+
+    local -a dirs=("/etc/wireguard" "$NODE_HOME")
+    [ -n "${PREFIX:-}" ] && dirs+=("${PREFIX}/etc/wireguard")
+
+    # --- 1. Ficheros de configuracion ---
+    # Se mira primero el nombre canonico y despues cualquier otro
+    # conf del directorio: el usuario pudo llamarlo wg0.conf.
+    local d f
+    for d in "${dirs[@]}"; do
+        [ -d "$d" ] || continue
+        for f in "$d/${NODE_IFACE}.conf" "$d"/*.conf; do
+            [ -f "$f" ] || continue
+            if _wg_conf_is_node "$f"; then
+                EX_WGCONF="$f"
+                break 2
+            fi
+        done
+    done
+
+    if [ -n "$EX_WGCONF" ]; then
+        EX_ADDRESS=$(_wg_conf_get "$EX_WGCONF" "Address")
+        EX_PEER_PUB=$(_wg_conf_get "$EX_WGCONF" "PublicKey")
+        EX_ENDPOINT=$(_wg_conf_get "$EX_WGCONF" "Endpoint")
+    fi
+
+    # --- 2. Claves sueltas del metodo manual ---
+    local k
+    for d in "${dirs[@]}"; do
+        [ -d "$d" ] || continue
+        for k in home_private.key wghome_private.key node_private.key privatekey; do
+            [ -f "$d/$k" ] && { EX_PRIV="$d/$k"; break; }
+        done
+        for k in home_public.key wghome_public.key node_public.key publickey; do
+            [ -f "$d/$k" ] && { EX_PUB="$d/$k"; break; }
+        done
+        [ -n "$EX_PRIV" ] && break
+    done
+
+    # --- 3. Servicio systemd del metodo manual ---
+    if command -v systemctl &>/dev/null; then
+        if systemctl is-enabled "wg-quick@${NODE_IFACE}" &>/dev/null; then
+            EX_UNIT="enabled"
+            systemctl is-active --quiet "wg-quick@${NODE_IFACE}" 2>/dev/null && EX_UNIT="enabled+active"
+        elif systemctl is-active --quiet "wg-quick@${NODE_IFACE}" 2>/dev/null; then
+            EX_UNIT="active"
+        fi
+    fi
+
+    # --- 4. Interfaz viva ---
+    # Es la evidencia mas fuerte: si existe, este equipo esta
+    # haciendo de nodo ahora mismo aunque falten los ficheros.
+    if _root_run "ip link show ${NODE_IFACE} 2>/dev/null" &>/dev/null; then
+        EX_IFACE="up"
+        [ -z "$EX_PEER_PUB" ] && EX_PEER_PUB=$(_root_run "wg show ${NODE_IFACE} peers 2>/dev/null" 2>/dev/null | head -1)
+        [ -z "$EX_ENDPOINT" ] && EX_ENDPOINT=$(_root_run "wg show ${NODE_IFACE} endpoints 2>/dev/null" 2>/dev/null | awk '{print $2}' | head -1)
+    fi
+
+    # --- 5. NAT ya montado ---
+    if _root_run "nft list ruleset 2>/dev/null" 2>/dev/null | grep -q "masquerade"; then
+        EX_NAT="nft"
+    elif _root_run "iptables -t nat -S POSTROUTING 2>/dev/null" 2>/dev/null | grep -q "MASQUERADE"; then
+        EX_NAT="iptables"
+    fi
+
+    # Hay nodo previo si aparece cualquiera de las tres evidencias
+    # que solo existen si alguien lo configuro a proposito.
+    [ -n "$EX_WGCONF" ] || [ -n "$EX_IFACE" ] || [ -n "$EX_UNIT" ]
+}
+
+# Convierte los hallazgos en un node.conf. No copia ni regenera
+# claves: apunta a las que ya existen, que son las que el VPS
+# tiene registradas.
+node_adopt_existing() {
+    CFG_MODE="wireguard"
+    CFG_DEVICE="${DEV_LABEL} · ${DEV_OS}"
+    CFG_ADOPTED="si"
+
+    # El conf adoptado manda; si no habia, se usara el nuestro.
+    if [ -n "$EX_WGCONF" ]; then
+        CFG_WG_CONF="$EX_WGCONF"
+        NODE_WGCONF="$EX_WGCONF"
+    fi
+
+    # wg-quick ya gestiona la interfaz: no se le disputa el mando,
+    # se usa el mismo servicio para subirla y bajarla.
+    if [ -n "$EX_UNIT" ]; then
+        CFG_WG_MANAGER="wg-quick"
+    else
+        CFG_WG_MANAGER="manual"
+    fi
+
+    CFG_VPS_PUBKEY="$EX_PEER_PUB"
+    if [ -n "$EX_ENDPOINT" ]; then
+        CFG_VPS_HOST="${EX_ENDPOINT%:*}"
+        CFG_VPS_PORT="${EX_ENDPOINT##*:}"
+    fi
+    [ -z "$CFG_VPS_PORT" ] && CFG_VPS_PORT="$NODE_DEFAULT_PORT"
+
+    # Las claves del metodo manual se dejan donde estan.
+    [ -n "$EX_PRIV" ] && NODE_PRIV="$EX_PRIV"
+    [ -n "$EX_PUB" ]  && NODE_PUB="$EX_PUB"
+
+    [ -n "$EX_UNIT" ] && CFG_AUTOSTART="on" || CFG_AUTOSTART="off"
+
+    node_cfg_save
+    _node_log "Configuracion previa adoptada: conf=${EX_WGCONF:-ninguno} unidad=${EX_UNIT:-ninguna} gestor=${CFG_WG_MANAGER}"
+}
+
+# Pantalla de adopcion. Enseña lo encontrado antes de tocar nada:
+# el usuario debe poder decir que no y conservar su montaje.
+node_screen_adopt() {
+    clear; node_title
+    ui_section "NODO YA CONFIGURADO" "se encontro una instalacion previa"
+    ui_blank
+    ui_info "Este dispositivo ya esta actuando como nodo de salida."
+    ui_blank
+
+    [ -n "$EX_WGCONF" ]  && echo -e "${UI_PAD}$(ui_cell "Configuracion" "$EX_WGCONF" 60 "$WH")"
+    [ -n "$EX_ADDRESS" ] && echo -e "${UI_PAD}$(ui_cell "Direccion" "$EX_ADDRESS" 60 "$CY")"
+    [ -n "$EX_PRIV" ]    && echo -e "${UI_PAD}$(ui_cell "Clave privada" "$EX_PRIV" 60 "$DM")"
+    [ -n "$EX_ENDPOINT" ]&& echo -e "${UI_PAD}$(ui_cell "VPS" "$EX_ENDPOINT" 60 "$WH")"
+    [ -n "$EX_UNIT" ]    && echo -e "${UI_PAD}$(ui_cell "wg-quick@${NODE_IFACE}" "$EX_UNIT" 60 "$GR")"
+    [ -n "$EX_IFACE" ]   && echo -e "${UI_PAD}$(ui_cell "Interfaz ${NODE_IFACE}" "activa ahora mismo" 60 "$GR")"
+    [ -n "$EX_NAT" ]     && echo -e "${UI_PAD}$(ui_cell "NAT existente" "$EX_NAT" 60 "$CY")"
+
+    ui_blank
+    ui_rule
+    ui_blank
+    echo -e "${UI_PAD}${DM}Al adoptarla, el panel toma el mando de lo que ya${CR}"
+    echo -e "${UI_PAD}${DM}existe: reutiliza tus claves —las que el VPS tiene${CR}"
+    echo -e "${UI_PAD}${DM}registradas— y no reescribe tu configuracion.${CR}"
+    ui_blank
+    ui_warn "Reconfigurar desde cero generaria claves nuevas y el"
+    echo -e "${UI_PAD}${DM}   VPS dejaria de reconocer a este nodo.${CR}"
+    ui_solid
+    ui_blank
+
+    if ui_confirm "¿Adoptar la configuracion existente?" "s"; then
+        node_adopt_existing
+        ui_blank
+        ui_ok "Configuracion adoptada. Tus claves siguen intactas."
+        [ "$CFG_WG_MANAGER" = "wg-quick" ] && \
+            ui_info "El tunel se seguira gestionando con wg-quick@${NODE_IFACE}."
+        ui_pause
+        return 0
+    fi
+    return 1
+}
 
 # =========================================================
 # DEPENDENCIAS
@@ -584,6 +804,17 @@ EOF
 }
 
 wg_write_conf() {
+    # Un conf adoptado es del usuario, no nuestro: reescribirlo
+    # borraria ajustes suyos (DNS, PostUp, MTU, rutas propias).
+    # Los cambios de endpoint se aplican con 'wg set', que toca
+    # solo el campo pedido.
+    if [ "$CFG_ADOPTED" = "si" ] && [ -f "$NODE_WGCONF" ]; then
+        _node_log "Conf adoptado ${NODE_WGCONF}: no se reescribe"
+        if [ -n "$CFG_VPS_PUBKEY" ] && [ -n "$CFG_VPS_HOST" ]; then
+            _root_try "wg set ${NODE_IFACE} peer ${CFG_VPS_PUBKEY} endpoint ${CFG_VPS_HOST}:${CFG_VPS_PORT}"
+        fi
+        return 0
+    fi
     wg_render_conf > "$NODE_WGCONF"
     chmod 600 "$NODE_WGCONF"
 }
@@ -614,6 +845,23 @@ wg_tunnel_up() {
     if wg_is_up; then
         [ -z "$quiet" ] && ui_warn "El tunel ya estaba activo."
         return 0
+    fi
+
+    # Si el montaje previo ya lo gestiona wg-quick, se usa su
+    # servicio en lugar de crear la interfaz por nuestra cuenta:
+    # dos gestores sobre la misma interfaz se pisan entre si.
+    if [ "$CFG_WG_MANAGER" = "wg-quick" ]; then
+        [ -z "$quiet" ] && ui_info "Levantando via wg-quick@${NODE_IFACE}..."
+        _root_try "systemctl start wg-quick@${NODE_IFACE}" || \
+            _root_try "wg-quick up ${NODE_IFACE}"
+        sleep 1
+        if wg_is_up; then
+            _node_log "Tunel ${NODE_IFACE} levantado por wg-quick"
+            [ -z "$quiet" ] && ui_ok "Tunel ${NODE_IFACE} activo."
+            return 0
+        fi
+        [ -z "$quiet" ] && ui_err "wg-quick no pudo levantar la interfaz."
+        return 1
     fi
 
     [ -z "$quiet" ] && ui_info "Creando interfaz ${NODE_IFACE}..."
@@ -654,6 +902,15 @@ wg_tunnel_up() {
 wg_tunnel_down() {
     local quiet="${1:-}"
     nat_off quiet
+
+    if [ "$CFG_WG_MANAGER" = "wg-quick" ]; then
+        _root_try "systemctl stop wg-quick@${NODE_IFACE}" || \
+            _root_try "wg-quick down ${NODE_IFACE}"
+        _node_log "Tunel ${NODE_IFACE} detenido por wg-quick"
+        [ -z "$quiet" ] && ui_ok "Tunel detenido."
+        return 0
+    fi
+
     if [ "$DEV_WG_KIND" = "userspace" ]; then
         _root_try "pkill -f 'wireguard-go ${NODE_IFACE}'"
         _root_try "rm -f /var/run/wireguard/${NODE_IFACE}.sock"
@@ -670,8 +927,25 @@ wg_tunnel_down() {
 # llegan a 10.77.77.2 y mueren ahi por falta de reenvio y de
 # traduccion de origen.
 # =========================================================
+# ¿Hay un masquerade puesto por otro (nftables del metodo manual,
+# firewalld, el propio usuario) que ya cubra nuestra subred?
+# Si lo hay no debemos añadir el nuestro: duplicar NAT no mejora
+# nada y ensucia un firewall que ya funcionaba.
+_nat_foreign_present() {
+    local up="$1"
+    _root_run "nft list ruleset 2>/dev/null" 2>/dev/null \
+        | grep -i "masquerade" | grep -qE "${NODE_SUBNET%/*}|oifname \"?${up}" && return 0
+    _root_run "iptables -t nat -S POSTROUTING 2>/dev/null" 2>/dev/null \
+        | grep -v "$NODE_TAG" | grep -i "MASQUERADE" | grep -qE "${NODE_SUBNET%/*}|-o ${up}" && return 0
+    return 1
+}
+
 nat_is_active() {
-    _root_run "iptables -t nat -C POSTROUTING -o $(_node_uplink_iface) -m comment --comment ${NODE_TAG} -j MASQUERADE 2>/dev/null" &>/dev/null
+    local up
+    up=$(_node_uplink_iface)
+    [ -z "$up" ] && return 1
+    _root_run "iptables -t nat -C POSTROUTING -o ${up} -m comment --comment ${NODE_TAG} -j MASQUERADE 2>/dev/null" &>/dev/null && return 0
+    _nat_foreign_present "$up"
 }
 
 nat_on() {
@@ -686,6 +960,15 @@ nat_on() {
     [ -z "$quiet" ] && ui_info "Salida por ${up} (tabla ${tbl})."
 
     _root_try "sysctl -w net.ipv4.ip_forward=1"
+
+    if _nat_foreign_present "$up"; then
+        _node_log "NAT ya provisto por reglas ajenas en ${up}: no se duplica"
+        [ -z "$quiet" ] && {
+            ui_ok "Ya existe NAT para esta salida (nftables o reglas propias)."
+            echo -e "${UI_PAD}${DM}   No se añaden reglas duplicadas.${CR}"
+        }
+        return 0
+    fi
 
     # Reenvio en ambos sentidos, etiquetado para poder retirarlo.
     _root_run "iptables -C FORWARD -i ${NODE_IFACE} -o ${up} -m comment --comment ${NODE_TAG} -j ACCEPT 2>/dev/null" &>/dev/null || \
@@ -1196,6 +1479,15 @@ node_screen_device() {
     ui_blank
     ui_row2 "Tipo" "${DEV_LABEL}" "Sistema" "${DEV_OS}"
     ui_row2 "Root" "$([ "$DEV_ROOT" = yes ] && echo 'si' || echo 'no')" "Arranque" "${DEV_INIT}"
+    if node_is_configured; then
+        local origen="asistente"
+        [ "$CFG_ADOPTED" = "si" ] && origen="adoptada de un montaje previo"
+        ui_row2 "Ya es nodo" "si" "Config" "${origen}"
+        [ "$CFG_MODE" = "wireguard" ] && \
+            ui_row2 "Conf en uso" "$(basename "${NODE_WGCONF}")" "Gestor" "${CFG_WG_MANAGER:-manual}"
+    else
+        ui_row2 "Ya es nodo" "no" "Config" "sin configurar"
+    fi
     ui_rule
     ui_blank
 
@@ -1233,6 +1525,14 @@ node_install() {
 
     if node_is_configured; then
         ui_warn "Ya existe una configuracion previa (modo ${CFG_MODE})."
+        if [ "$CFG_ADOPTED" = "si" ]; then
+            ui_blank
+            ui_warn "Esta configuracion se adopto de un montaje anterior."
+            echo -e "${UI_PAD}${DM}   Sus claves son las que el VPS tiene registradas.${CR}"
+            echo -e "${UI_PAD}${DM}   Si solo quieres cambiar el host o la clave del VPS,${CR}"
+            echo -e "${UI_PAD}${DM}   usa la opcion 6 del menu en lugar de reconfigurar.${CR}"
+        fi
+        ui_blank
         ui_confirm "¿Sobrescribirla?" "n" || { ui_ok "Sin cambios."; sleep 1; return; }
     fi
 
@@ -1596,6 +1896,7 @@ node_menu() {
 
         [ "$CFG_MODE" = "wireguard" ] && modo_txt="WireGuard" || modo_txt="SOCKS inverso"
 
+        [ "$CFG_ADOPTED" = "si" ] && modo_txt="${modo_txt} (adoptado)"
         ui_row2 "Dispositivo" "${DEV_LABEL}" "Modo" "${modo_txt}"
         local up_now
         up_now=$(_node_uplink_iface)
@@ -1746,11 +2047,25 @@ node_main() {
         node_menu
     else
         _node_offer_sudo "$@"
+
+        # No hay node.conf, pero eso no significa que el equipo sea
+        # virgen: pudo montarse a mano antes de que existiera este
+        # script. Se busca la huella del protocolo antes de ofrecer
+        # un asistente que generaria claves nuevas y romperia el
+        # registro que el VPS ya tiene.
+        if _node_scan_existing; then
+            if node_screen_adopt; then
+                node_cfg_load && node_menu
+                return 0
+            fi
+        fi
+
         clear; node_title
         ui_section "PRIMER ARRANQUE" "este dispositivo aun no es un nodo"
         ui_blank
         ui_info "No se encontro configuracion previa."
         echo -e "${UI_PAD}${DM}   Buscada en: ${NODE_CONF}${CR}"
+        echo -e "${UI_PAD}${DM}   Y tambien en /etc/wireguard (metodo manual).${CR}"
         ui_blank
         ui_pause
         node_install
