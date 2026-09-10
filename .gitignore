@@ -1,0 +1,30 @@
+# Claves y secretos — NUNCA commitear
+# La configuracion real del nodo vive fuera del repo
+# (/etc/wghome-node, $PREFIX/etc/wghome-node o ~/.wghome-node),
+# pero si alguien prueba dentro del arbol, que no se escape.
+node.conf
+node_private.key
+node_public.key
+ssh_node_key
+ssh_node_key.pub
+known_hosts
+wg-home.conf
+vps-setup.txt
+id_rsa
+id_ed25519
+id_*
+*.pem
+*.key
+*.crt
+
+# Estado local del nodo
+node.log
+ssh.log
+guardian.log
+guardian.pid
+*.log
+
+# Temporales
+*.swp
+*~
+.DS_Store
