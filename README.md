@@ -166,6 +166,25 @@ Puedes decir que no y conservar tu montaje intacto.
 
 ---
 
+## Varios nodos a la vez
+
+El VPS admite varios nodos registrados (PC, móvil, Raspberry…), cada uno con su
+propia IP dentro de `10.77.77.0/24`, y **no se ven entre sí**: el reenvío de
+`wg-home` hacia `wg-home` está cortado en la droplet.
+
+**Sólo uno puede ser la salida a Internet en cada momento.** Esto no es una
+decisión de diseño, es el protocolo: WireGuard reparte los paquetes por
+`AllowedIPs`, y dos peers no pueden declarar `0.0.0.0/0` a la vez — el segundo
+se lo quitaría al primero. Así que el nodo activo lleva `0.0.0.0/0` y el resto
+sólo su `/32`: siguen conectados y alcanzables, listos para relevarlo, pero no
+reciben el tráfico de Internet.
+
+Cambiar de salida es instantáneo y no toca claves: en el panel del VPS,
+`GESTIONAR NODOS ▸ CAMBIAR SALIDA`.
+
+Al dar de alta un nodo, el VPS le asigna una IP y te la muestra. **Configura esa
+misma IP aquí**, en el asistente — si pones otra, el enrutado no funciona.
+
 ## El VPS no puede hacer ping al nodo primero
 
 Es la confusión más común, y **no es un fallo**. El bloque `[Peer]` que genera

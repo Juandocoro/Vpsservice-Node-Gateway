@@ -160,7 +160,8 @@ NODE_VERSION="v1.0"
 NODE_IFACE="wg-home"
 NODE_SUBNET="10.77.77.0/24"
 NODE_VPS_WGIP="10.77.77.1"
-NODE_SELF_WGIP="10.77.77.2"
+NODE_SELF_WGIP="10.77.77.2"   # por defecto; el VPS puede asignar otra
+                              # cuando hay varios nodos registrados
 NODE_DEFAULT_PORT="51820"
 NODE_KEEPALIVE="25"
 
@@ -455,6 +456,7 @@ CFG_DEVICE=""      # etiqueta con la que se instalo
 CFG_WG_CONF=""     # ruta del .conf de WireGuard realmente en uso
 CFG_WG_MANAGER=""  # wg-quick | manual — quien manda sobre la interfaz
 CFG_ADOPTED=""     # si | no — venia de una instalacion previa a mano
+CFG_SELF_IP=""     # direccion que el VPS asigno a este nodo
 
 _node_cfg_get() {
     local key="$1"
@@ -475,6 +477,8 @@ node_cfg_load() {
     CFG_WG_CONF=$(_node_cfg_get WG_CONF)
     CFG_WG_MANAGER=$(_node_cfg_get WG_MANAGER)
     CFG_ADOPTED=$(_node_cfg_get ADOPTED)
+    CFG_SELF_IP=$(_node_cfg_get SELF_IP)
+    [ -n "$CFG_SELF_IP" ] && NODE_SELF_WGIP="$CFG_SELF_IP"
 
     # Un nodo adoptado usa el .conf que ya tenia, no el nuestro.
     [ -n "$CFG_WG_CONF" ] && NODE_WGCONF="$CFG_WG_CONF"
@@ -519,6 +523,7 @@ AUTOSTART=${CFG_AUTOSTART}
 WG_CONF=${CFG_WG_CONF}
 WG_MANAGER=${CFG_WG_MANAGER}
 ADOPTED=${CFG_ADOPTED}
+SELF_IP=${NODE_SELF_WGIP}
 PRIV_KEY=${NODE_PRIV}
 PUB_KEY=${NODE_PUB}
 EOF
@@ -562,10 +567,27 @@ _wg_conf_get() {
 
 # ¿Este .conf describe a un nodo de salida de nuestro protocolo?
 # La prueba es la direccion 10.77.77.2, no el nombre del fichero.
+# El VPS reparte una IP por nodo dentro de 10.77.77.0/24, asi que la
+# huella no es una direccion concreta sino pertenecer al rango: .2 a
+# .254. Se excluye la .1, que es el propio VPS, y la .255.
 _wg_conf_is_node() {
-    local file="$1" addr
+    local file="$1" addr host
     addr=$(_wg_conf_get "$file" "Address")
-    [ -n "$addr" ] && [[ "$addr" == ${NODE_SELF_WGIP}/* || "$addr" == "$NODE_SELF_WGIP" ]]
+    [ -z "$addr" ] && return 1
+    addr="${addr%%/*}"; addr="${addr%%,*}"; addr=$(printf '%s' "$addr" | tr -d '[:space:]')
+    case "$addr" in
+        10.77.77.*) host="${addr##*.}" ;;
+        *) return 1 ;;
+    esac
+    [ "$host" -ge 2 ] 2>/dev/null && [ "$host" -le 254 ] 2>/dev/null
+}
+
+# Direccion que este nodo tiene asignada, leida de su propio conf.
+_wg_conf_node_ip() {
+    local addr
+    addr=$(_wg_conf_get "$1" "Address")
+    addr="${addr%%/*}"; addr="${addr%%,*}"
+    printf '%s' "$addr" | tr -d '[:space:]'
 }
 
 _node_scan_existing() {
@@ -664,6 +686,15 @@ node_adopt_existing() {
     else
         CFG_WG_MANAGER="manual"
     fi
+
+    # La IP la manda el conf adoptado: puede no ser la .2 si el VPS
+    # ya tenia otro nodo ocupandola.
+    if [ -n "$EX_ADDRESS" ]; then
+        local a="${EX_ADDRESS%%/*}"
+        a=$(printf '%s' "$a" | tr -d '[:space:]')
+        [ -n "$a" ] && NODE_SELF_WGIP="$a"
+    fi
+    CFG_SELF_IP="$NODE_SELF_WGIP"
 
     CFG_VPS_PUBKEY="$EX_PEER_PUB"
     if [ -n "$EX_ENDPOINT" ]; then
@@ -1881,6 +1912,19 @@ node_install_wireguard() {
 
     ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"
     CFG_VPS_PUBKEY="$REPLY_UI"
+
+    # Con varios nodos registrados el VPS reparte una IP a cada uno y
+    # la enseña al darlos de alta. Poner otra rompe el enrutado.
+    ui_blank
+    echo -e "${UI_PAD}${DM}El VPS asigna una IP a cada nodo al registrarlo${CR}"
+    echo -e "${UI_PAD}${DM}(GESTIONAR NODOS te la muestra). Si solo hay uno,${CR}"
+    echo -e "${UI_PAD}${DM}deja el valor por defecto.${CR}"
+    ui_ask "IP de este nodo en el tunel" "${NODE_SELF_WGIP}"
+    case "$REPLY_UI" in
+        10.77.77.*) NODE_SELF_WGIP="$REPLY_UI" ;;
+        *) ui_warn "Fuera de 10.77.77.0/24; se deja ${NODE_SELF_WGIP}." ;;
+    esac
+    CFG_SELF_IP="$NODE_SELF_WGIP"
     if ! echo "$CFG_VPS_PUBKEY" | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
         ui_warn "Esa clave no tiene el formato base64 de 44 caracteres."
         ui_confirm "¿Continuar igualmente?" "n" || { ui_pause; return 1; }
@@ -2373,6 +2417,9 @@ node_menu() {
                     ui_ask "IP o dominio del VPS" "$CFG_VPS_HOST"; CFG_VPS_HOST="$REPLY_UI"
                     ui_ask "Puerto WireGuard" "$CFG_VPS_PORT";     CFG_VPS_PORT="$REPLY_UI"
                     ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"; CFG_VPS_PUBKEY="$REPLY_UI"
+                    ui_ask "IP de este nodo" "$NODE_SELF_WGIP"
+                    case "$REPLY_UI" in 10.77.77.*) NODE_SELF_WGIP="$REPLY_UI";; esac
+                    CFG_SELF_IP="$NODE_SELF_WGIP"
                     node_cfg_save; wg_write_conf
                     ui_blank; ui_ok "Datos actualizados."
                     if node_link_is_up && ui_confirm "¿Reiniciar el tunel para aplicarlos?" "s"; then
