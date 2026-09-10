@@ -1771,8 +1771,12 @@ autostart_disable() {
 # PANTALLAS
 # =========================================================
 node_title() {
+    local ver="${NODE_VERSION}"
+    local rev
+    rev=$(git -C "$(dirname "$NODE_SELF")" rev-parse --short HEAD 2>/dev/null)
+    [ -n "$rev" ] && ver="${NODE_VERSION} · ${rev}"
     echo ""
-    ui_header "NODO · ${NODE_VERSION}"
+    ui_header "NODO · ${ver}"
 }
 
 # Recomendacion de modo segun lo que el aparato permite de verdad.
@@ -2380,6 +2384,140 @@ node_remove() {
     ui_pause
 }
 
+
+# =========================================================
+# ACTUALIZACION
+# ---------------------------------------------------------
+# La configuracion vive fuera del directorio de instalacion
+# (/etc/wghome-node, $PREFIX/etc/wghome-node o ~/.wghome-node),
+# asi que actualizar nunca toca las claves ni el emparejamiento
+# con el VPS.
+# =========================================================
+NODE_REPO_URL="https://github.com/Juandocoro/Vpsservice-Node-Gateway.git"
+NODE_RAW_URL="https://raw.githubusercontent.com/Juandocoro/Vpsservice-Node-Gateway/main/node.sh"
+
+node_install_dir() { dirname "$NODE_SELF"; }
+
+# Commit instalado, si vino por git. Sirve para saber que version
+# se esta ejecutando cuando algo no cuadra.
+node_local_rev() {
+    git -C "$(node_install_dir)" rev-parse --short HEAD 2>/dev/null
+}
+
+_node_fetch() {
+    local url="$1" out="$2"
+    if command -v curl &>/dev/null; then
+        curl -fsSL --max-time 30 "$url" -o "$out" 2>/dev/null
+    elif command -v wget &>/dev/null; then
+        wget -qO "$out" --timeout=30 "$url" 2>/dev/null
+    else
+        return 1
+    fi
+    [ -s "$out" ]
+}
+
+node_update() {
+    clear; node_title
+    ui_section "ACTUALIZAR" "traer la ultima version de GitHub"
+    ui_blank
+
+    local dir rev
+    dir=$(node_install_dir)
+    rev=$(node_local_rev)
+
+    ui_row2 "Instalado en" "$dir" "Version" "${rev:-suelta}"
+    ui_blank
+    ui_info "Tus claves y la configuracion NO se tocan:"
+    echo -e "${UI_PAD}${DM}   viven en ${NODE_HOME}, fuera de la instalacion.${CR}"
+    ui_blank
+
+    if [ ! -w "$dir" ]; then
+        ui_err "No hay permiso de escritura en ${dir}."
+        echo -e "${UI_PAD}${DM}   Relanza con sudo para poder actualizar.${CR}"
+        ui_pause; return 1
+    fi
+
+    # --- Via git: es como lo deja setup.sh ---
+    if [ -d "${dir}/.git" ] && command -v git &>/dev/null; then
+        ui_info "Consultando GitHub..."
+        if ! git -C "$dir" fetch --quiet origin 2>/dev/null; then
+            ui_err "No se pudo contactar con GitHub. ¿Hay conexion?"
+            ui_pause; return 1
+        fi
+        local behind
+        behind=$(git -C "$dir" rev-list --count HEAD..origin/main 2>/dev/null)
+        if [ "${behind:-0}" -eq 0 ]; then
+            ui_blank; ui_ok "Ya estas en la ultima version."
+            ui_pause; return 0
+        fi
+
+        ui_blank
+        ui_ok "Hay ${behind} cambio(s) nuevo(s):"
+        ui_blank
+        git -C "$dir" log --oneline HEAD..origin/main 2>/dev/null | head -12 | sed "s/^/${UI_PAD}  /"
+        ui_blank
+        ui_confirm "¿Actualizar ahora?" "s" || return 0
+
+        # El script se esta ejecutando desde el fichero que git va a
+        # reescribir. Bash lee el fichero a medida que avanza, asi que
+        # sustituirlo bajo sus pies puede hacerle leer basura. Se
+        # delega en un ayudante que se borra a si mismo y que, al
+        # terminar, arranca la version nueva.
+        local helper="${NODE_HOME}/.update.$$"
+        cat > "$helper" <<EOF
+#!/bin/bash
+rm -f "\$0"
+cd "${dir}" || exit 1
+git pull --ff-only --quiet origin main
+chmod +x "${dir}"/*.sh 2>/dev/null
+echo ""
+echo "  Actualizado a \$(git -C "${dir}" rev-parse --short HEAD 2>/dev/null)"
+echo "  Reiniciando el panel..."
+sleep 2
+exec bash "${NODE_SELF}"
+EOF
+        chmod +x "$helper"
+        _node_log "Actualizando desde ${rev:-?} (${behind} commits por delante)"
+        exec bash "$helper"
+    fi
+
+    # --- Via descarga directa: instalacion suelta, sin git ---
+    ui_warn "Esta instalacion no vino por git."
+    ui_info "Se descargara node.sh directamente."
+    ui_blank
+    ui_confirm "¿Continuar?" "s" || return 0
+
+    local tmp="${NODE_HOME}/.node.new"
+    if ! _node_fetch "$NODE_RAW_URL" "$tmp"; then
+        ui_err "No se pudo descargar. ¿Hay conexion? ¿curl o wget instalados?"
+        rm -f "$tmp"; ui_pause; return 1
+    fi
+
+    # Nunca sustituir el script por algo que no sea bash valido: una
+    # descarga a medias dejaria el nodo inservible y sin panel desde
+    # el que arreglarlo.
+    if ! bash -n "$tmp" 2>/dev/null; then
+        ui_err "El fichero descargado no es un script valido. Se descarta."
+        rm -f "$tmp"; ui_pause; return 1
+    fi
+    if ! head -20 "$tmp" | grep -q "NODO DE SALIDA RESIDENCIAL"; then
+        ui_err "El fichero descargado no parece node.sh. Se descarta."
+        rm -f "$tmp"; ui_pause; return 1
+    fi
+
+    cp -p "$NODE_SELF" "${NODE_SELF}.bak" 2>/dev/null
+    # mv y no cp: renombrar cambia el inodo y el bash en marcha sigue
+    # leyendo el fichero antiguo, intacto, hasta que termine.
+    mv "$tmp" "$NODE_SELF" && chmod +x "$NODE_SELF"
+    _node_log "node.sh actualizado por descarga directa"
+
+    ui_blank
+    ui_ok "Actualizado. Copia de seguridad en ${NODE_SELF}.bak"
+    ui_info "Reiniciando el panel..."
+    sleep 2
+    exec bash "$NODE_SELF"
+}
+
 # =========================================================
 # MENU PRINCIPAL
 # =========================================================
@@ -2443,11 +2581,12 @@ node_menu() {
         ui_opt "9" "REGISTRO"          "ultimos eventos"
         ui_opt "10" "DATOS DEL EQUIPO" "que soporta"
         ui_opt "12" "COMPROBAR EL VPS"  "si no hay handshake"
+        ui_opt "13" "ACTUALIZAR"        "traer de GitHub"
         ui_blank
         ui_opt_danger "11" "ELIMINAR NODO" "borra todo"
         ui_opt "0" "SALIR"
         ui_solid
-        ui_prompt "Elige una opcion [0-12]"
+        ui_prompt "Elige una opcion [0-13]"
 
         case "$REPLY_UI" in
             1)  node_install ;;
@@ -2498,6 +2637,7 @@ node_menu() {
             9)  node_show_log ;;
             10) node_screen_device; ui_pause ;;
             12) node_screen_vps_check ;;
+            13) node_update ;;
             11) node_remove
                 node_is_configured || return 0 ;;
             0)  clear; return 0 ;;
