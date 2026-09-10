@@ -635,9 +635,12 @@ _node_scan_existing() {
         EX_NAT="iptables"
     fi
 
-    # Hay nodo previo si aparece cualquiera de las tres evidencias
-    # que solo existen si alguien lo configuro a proposito.
-    [ -n "$EX_WGCONF" ] || [ -n "$EX_IFACE" ] || [ -n "$EX_UNIT" ]
+    # Una interfaz wg-home viva NO basta por si sola: nuestro propio
+    # script pudo dejarla creada y sin peer en un intento fallido, y
+    # adoptarla generaba una config que apuntaba a claves
+    # inexistentes. Solo cuenta si ademas tiene peer.
+    [ -n "$EX_WGCONF" ] || [ -n "$EX_UNIT" ] || \
+        { [ -n "$EX_IFACE" ] && [ -n "$EX_PEER_PUB" ]; }
 }
 
 # Convierte los hallazgos en un node.conf. No copia ni regenera
@@ -787,17 +790,57 @@ _node_ensure_ssh() {
 wg_generate_keys() {
     mkdir -p "$NODE_HOME" 2>/dev/null
     chmod 700 "$NODE_HOME" 2>/dev/null
-    if [ ! -f "$NODE_PRIV" ]; then
-        (umask 077; wg genkey > "$NODE_PRIV")
-        wg pubkey < "$NODE_PRIV" > "$NODE_PUB"
-        chmod 600 "$NODE_PRIV"; chmod 644 "$NODE_PUB"
-        _node_log "Par de claves WireGuard generado"
-        return 0
+
+    if ! command -v wg &>/dev/null; then
+        ui_err "El comando 'wg' no esta disponible: no se pueden generar claves."
+        _node_log "wg genkey imposible: falta wireguard-tools"
+        return 1
     fi
-    # Si la publica se perdio se regenera desde la privada, sin
-    # invalidar el registro que ya tenga el VPS.
-    [ -f "$NODE_PUB" ] || wg pubkey < "$NODE_PRIV" > "$NODE_PUB"
-    return 0
+
+    # La comprobacion es -s, no -f. Si un intento anterior fallo con
+    # 'wg' aun sin instalar, quedo un fichero de cero bytes; con -f
+    # se daba por bueno para siempre y el nodo no arrancaba nunca.
+    if [ ! -s "$NODE_PRIV" ]; then
+        (umask 077; wg genkey > "$NODE_PRIV" 2>/dev/null)
+        if [ ! -s "$NODE_PRIV" ]; then
+            rm -f "$NODE_PRIV" 2>/dev/null
+            ui_err "No se pudo generar la clave privada."
+            _node_log "wg genkey produjo un fichero vacio"
+            return 1
+        fi
+        chmod 600 "$NODE_PRIV"
+        _node_log "Par de claves WireGuard generado"
+    fi
+
+    # La publica se deriva siempre que falte o este vacia; hacerlo
+    # no invalida el registro que el VPS ya tenga.
+    if [ ! -s "$NODE_PUB" ]; then
+        wg pubkey < "$NODE_PRIV" > "$NODE_PUB" 2>/dev/null
+        chmod 644 "$NODE_PUB" 2>/dev/null
+    fi
+    [ -s "$NODE_PUB" ]
+}
+
+# Devuelve las rutas de trabajo a las nuestras. Reconfigurar desde
+# cero no puede heredar los punteros de una adopcion anterior: si
+# lo hiciera, escribiriamos claves nuevas en un sitio y buscariamos
+# la config en otro.
+_node_reset_paths() {
+    NODE_WGCONF="${NODE_HOME}/wg-home.conf"
+    NODE_PRIV="${NODE_HOME}/node_private.key"
+    NODE_PUB="${NODE_HOME}/node_public.key"
+}
+
+# ¿La configuracion actual sirve para levantar el tunel? Un nodo
+# puede quedar a medias (adoptado de algo que no era un nodo, o con
+# claves que nunca llegaron a generarse) y conviene decirlo antes de
+# que el usuario lo descubra al conectar.
+node_config_is_sane() {
+    [ "$CFG_MODE" != "wireguard" ] && return 0
+    [ -n "$CFG_VPS_PUBKEY" ] && [ -n "$CFG_VPS_HOST" ] || return 1
+    [ -s "$NODE_PRIV" ] && return 0
+    [ -n "$NODE_WGCONF" ] && [ -n "$(_wg_conf_get "$NODE_WGCONF" "PrivateKey")" ] && return 0
+    return 1
 }
 
 wg_render_conf() {
@@ -826,7 +869,10 @@ wg_write_conf() {
     # borraria ajustes suyos (DNS, PostUp, MTU, rutas propias).
     # Los cambios de endpoint se aplican con 'wg set', que toca
     # solo el campo pedido.
-    if [ "$CFG_ADOPTED" = "si" ] && [ -f "$NODE_WGCONF" ]; then
+    # La guarda exige que el conf adoptado tenga clave dentro. Un
+    # fichero ausente o vacio no es "configuracion del usuario que
+    # hay que respetar": protegerlo dejaba al nodo sin salida.
+    if [ "$CFG_ADOPTED" = "si" ] && [ -n "$(_wg_conf_get "$NODE_WGCONF" "PrivateKey")" ]; then
         _node_log "Conf adoptado ${NODE_WGCONF}: no se reescribe"
         if [ -n "$CFG_VPS_PUBKEY" ] && [ -n "$CFG_VPS_HOST" ]; then
             _root_try "wg set ${NODE_IFACE} peer ${CFG_VPS_PUBKEY} endpoint ${CFG_VPS_HOST}:${CFG_VPS_PORT}"
@@ -1764,6 +1810,11 @@ node_install_wireguard() {
     ui_info "Preparando modo WireGuard..."
     _node_ensure_wg_tools || { ui_err "No se pudo instalar wireguard-tools."; ui_pause; return 1; }
 
+    # Reconfigurar es empezar de cero: se sueltan los punteros de
+    # cualquier adopcion previa y se vuelve a nuestras rutas.
+    CFG_ADOPTED="no"; CFG_WG_CONF=""; CFG_WG_MANAGER="manual"
+    _node_reset_paths
+
     CFG_VPS_PORT="$NODE_DEFAULT_PORT"
     ui_blank
     echo -e "${UI_PAD}${DM}Datos del VPS. Los encuentras en el panel:${CR}"
@@ -1784,7 +1835,9 @@ node_install_wireguard() {
         ui_confirm "¿Continuar igualmente?" "n" || { ui_pause; return 1; }
     fi
 
-    wg_generate_keys
+    if ! wg_generate_keys; then
+        ui_pause; return 1
+    fi
     node_cfg_save
     wg_write_conf
     _node_log "Nodo configurado en modo WireGuard contra ${CFG_VPS_HOST}"
@@ -2109,6 +2162,22 @@ node_menu() {
             ui_row2 "Handshake" "${agetxt}" "NAT" "$(nat_is_active && echo activo || echo inactivo)"
         fi
         ui_rule
+
+        # Si la config no da para levantar el tunel, decirlo aqui y
+        # no dentro de tres opciones: es lo primero que el usuario
+        # necesita saber al abrir el panel.
+        if ! node_config_is_sane; then
+            ui_blank
+            ui_err "Esta configuracion NO puede levantar el tunel."
+            if [ ! -s "$NODE_PRIV" ] && [ -z "$(_wg_conf_get "$NODE_WGCONF" "PrivateKey")" ]; then
+                echo -e "${UI_PAD}${DM}   Falta la clave privada de este nodo.${CR}"
+            else
+                echo -e "${UI_PAD}${DM}   Faltan la clave publica o el host del VPS.${CR}"
+            fi
+            echo -e "${UI_PAD}${WH}   Usa la opcion [1] para reconfigurar desde cero.${CR}"
+            echo -e "${UI_PAD}${DM}   Generara claves nuevas: habra que registrarlas${CR}"
+            echo -e "${UI_PAD}${DM}   en el panel del VPS con su opcion [6].${CR}"
+        fi
         ui_blank
 
         echo -e "${UI_PAD}${YL}── ENLACE ──${CR}"
