@@ -1226,25 +1226,39 @@ wg_tunnel_down() {
 # llegan a 10.77.77.2 y mueren ahi por falta de reenvio y de
 # traduccion de origen.
 # =========================================================
-# ¿Hay un masquerade puesto por otro (nftables del metodo manual,
-# firewalld, el propio usuario) que ya cubra nuestra subred?
-# Si lo hay no debemos añadir el nuestro: duplicar NAT no mejora
-# nada y ensucia un firewall que ya funcionaba.
-_nat_foreign_present() {
-    local up="$1"
-    _root_run "nft list ruleset 2>/dev/null" 2>/dev/null \
-        | grep -i "masquerade" | grep -qE "${NODE_SUBNET%/*}|oifname \"?${up}" && return 0
-    _root_run "iptables -t nat -S POSTROUTING 2>/dev/null" 2>/dev/null \
-        | grep -v "$NODE_TAG" | grep -i "MASQUERADE" | grep -qE "${NODE_SUBNET%/*}|-o ${up}" && return 0
-    return 1
-}
-
+# El estado del NAT se mide por NUESTRAS reglas, las dos que hacen
+# falta para que el trafico atraviese: el reenvio y la traduccion.
+#
+# Antes bastaba con encontrar CUALQUIER masquerade que mencionara la
+# interfaz de salida, y ademas se usaba para saltarse la instalacion
+# entera dando por hecho que ya estaba puesta. En un movil eso es
+# siempre falso positivo: Android trae sus propias reglas de
+# masquerade para compartir datos. Resultado: no se instalaba nada
+# —ni reenvio, ni traduccion, ni el policy routing, que en Android
+# es lo unico que hace que el paquete reenviado encuentre salida— y
+# el panel lo daba por activo. El tunel levantaba, el handshake
+# entraba, y no pasaba un solo byte.
+#
+# Duplicar un masquerade, por cierto, es inofensivo: conntrack
+# traduce cada conexion una sola vez.
 nat_is_active() {
     local up
     up=$(_node_uplink_iface)
     [ -z "$up" ] && return 1
-    _root_run "iptables -t nat -C POSTROUTING -o ${up} -m comment --comment ${NODE_TAG} -j MASQUERADE 2>/dev/null" &>/dev/null && return 0
-    _nat_foreign_present "$up"
+    _root_run "iptables -t nat -C POSTROUTING -o ${up} -m comment --comment ${NODE_TAG} -j MASQUERADE 2>/dev/null" &>/dev/null || return 1
+    _root_run "iptables -C FORWARD -i ${NODE_IFACE} -o ${up} -m comment --comment ${NODE_TAG} -j ACCEPT 2>/dev/null" &>/dev/null || return 1
+    return 0
+}
+
+# Paquetes que han pasado de verdad por nuestras reglas. Es la unica
+# prueba de que el nodo esta reenviando: una regla instalada con el
+# contador a cero significa que el trafico no llega hasta ella.
+nat_counters() {
+    local up
+    up=$(_node_uplink_iface)
+    [ -z "$up" ] && return 1
+    _root_run "iptables -L FORWARD -v -n -x 2>/dev/null" 2>/dev/null | grep "$NODE_TAG"
+    _root_run "iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null" 2>/dev/null | grep "$NODE_TAG"
 }
 
 nat_on() {
@@ -1259,15 +1273,6 @@ nat_on() {
     [ -z "$quiet" ] && ui_info "Salida por ${up} (tabla ${tbl})."
 
     _root_try "sysctl -w net.ipv4.ip_forward=1"
-
-    if _nat_foreign_present "$up"; then
-        _node_log "NAT ya provisto por reglas ajenas en ${up}: no se duplica"
-        [ -z "$quiet" ] && {
-            ui_ok "Ya existe NAT para esta salida (nftables o reglas propias)."
-            echo -e "${UI_PAD}${DM}   No se añaden reglas duplicadas.${CR}"
-        }
-        return 0
-    fi
 
     # Reenvio en ambos sentidos, etiquetado para poder retirarlo.
     _root_run "iptables -C FORWARD -i ${NODE_IFACE} -o ${up} -m comment --comment ${NODE_TAG} -j ACCEPT 2>/dev/null" &>/dev/null || \
@@ -1284,15 +1289,18 @@ nat_on() {
     _root_run "iptables -t mangle -C FORWARD -o ${up} -p tcp --tcp-flags SYN,RST SYN -m comment --comment ${NODE_TAG} -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null" &>/dev/null || \
         _root_try "iptables -t mangle -A FORWARD -o ${up} -p tcp --tcp-flags SYN,RST SYN -m comment --comment ${NODE_TAG} -j TCPMSS --clamp-mss-to-pmtu"
 
-    # Policy routing solo donde hace falta. En Android la default
-    # no esta en main, asi que el paquete reenviado no encontraria
-    # salida y la respuesta no sabria volver al tunel.
+    # Policy routing. En Android la ruta por defecto no vive en main
+    # sino en una tabla por red, asi que sin estas reglas el paquete
+    # reenviado no encuentra salida y la respuesta no sabe volver al
+    # tunel. En un Linux normal la tabla es main y las reglas sobran,
+    # pero ponerlas no molesta: se añaden siempre y asi no dependemos
+    # de acertar con la deteccion de la tabla.
     if [ "$tbl" != "main" ]; then
         _root_run "ip rule show 2>/dev/null" 2>/dev/null | grep -q "iif ${NODE_IFACE} lookup ${tbl}" || \
             _root_try "ip rule add iif ${NODE_IFACE} lookup ${tbl} priority ${NODE_RULE_PRIO_FWD}"
-        _root_run "ip rule show 2>/dev/null" 2>/dev/null | grep -q "to ${NODE_SUBNET} lookup main" || \
-            _root_try "ip rule add to ${NODE_SUBNET} lookup main priority ${NODE_RULE_PRIO_BACK}"
     fi
+    _root_run "ip rule show 2>/dev/null" 2>/dev/null | grep -q "to ${NODE_SUBNET} lookup main" || \
+        _root_try "ip rule add to ${NODE_SUBNET} lookup main priority ${NODE_RULE_PRIO_BACK}"
 
     _node_log "NAT activado hacia ${up} (tabla ${tbl})"
     [ -z "$quiet" ] && ui_ok "Salida a Internet compartida con el VPS."
@@ -2248,14 +2256,16 @@ node_diagnose() {
 
     # 5 — Puerta hacia Internet
     if [ "$CFG_MODE" = "wireguard" ]; then
-        local fwd
+        local fwd up_i
         fwd=$(_root_run "sysctl -n net.ipv4.ip_forward 2>/dev/null" 2>/dev/null | tr -dc '0-9')
-        if [ "$fwd" = "1" ] && nat_is_active; then
-            _chk_ok "5/5 reenvio y NAT activos hacia $(_node_uplink_iface)."
-        elif [ "$fwd" != "1" ]; then
+        up_i=$(_node_uplink_iface)
+        if [ "$fwd" != "1" ]; then
             _chk_fail "5/5 ip_forward apagado: el VPS no navegara."
+        elif nat_is_active; then
+            _chk_ok "5/5 reenvio y NAT instalados hacia ${up_i}."
         else
-            _chk_fail "5/5 falta la regla MASQUERADE."
+            _chk_fail "5/5 faltan nuestras reglas de reenvio o NAT."
+            echo -e "${UI_PAD}${DM}     Apaga y enciende la conexion (opcion 2) para ponerlas.${CR}"
         fi
     else
         if [ -f "${NODE_HOME}/vps-setup.txt" ]; then
@@ -2273,6 +2283,33 @@ node_diagnose() {
         ui_blank
         echo -e "${UI_PAD}${YL}── Estado WireGuard ──${CR}"
         _root_run "wg show ${NODE_IFACE} 2>/dev/null" 2>/dev/null | sed 's/^/    /'
+
+        # Un tunel con handshake pero sin trafico reenviado es el
+        # caso que mas confunde: parece que funciona y no pasa nada.
+        # Los contadores lo resuelven — dicen si el paquete llego a
+        # la regla y si la cruzo.
+        ui_blank
+        echo -e "${UI_PAD}${YL}── Trafico que ha cruzado nuestras reglas ──${CR}"
+        local ctr
+        ctr=$(nat_counters)
+        if [ -n "$ctr" ]; then
+            echo "$ctr" | awk '{printf "    %-12s %-12s %s\n", $1" pkts", $2" bytes", substr($0, index($0,$3))}' \
+                | cut -c1-100
+            ui_blank
+            if echo "$ctr" | awk '{s+=$1} END{exit (s>0)?0:1}'; then
+                ui_ok "Hay paquetes cruzando: el nodo esta reenviando."
+            else
+                ui_warn "Reglas instaladas pero con CERO paquetes."
+                echo -e "${UI_PAD}${DM}   El tunel esta vivo y las reglas puestas, pero el VPS${CR}"
+                echo -e "${UI_PAD}${DM}   no esta mandando trafico. Falta activarlo alli:${CR}"
+                echo -e "${UI_PAD}${DM}   · GESTIONAR NODOS > CAMBIAR SALIDA -> este nodo${CR}"
+                echo -e "${UI_PAD}${DM}   · SALIDA RESIDENCIAL -> encender${CR}"
+                echo -e "${UI_PAD}${DM}   · CONFIGURAR USUARIOS -> elegir quien sale por aqui${CR}"
+            fi
+        else
+            ui_err "No hay ninguna regla nuestra instalada."
+            echo -e "${UI_PAD}${DM}   Apaga y enciende la conexion (opcion 2).${CR}"
+        fi
     fi
 
     ui_solid
