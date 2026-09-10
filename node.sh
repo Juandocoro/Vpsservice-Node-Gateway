@@ -1902,6 +1902,67 @@ node_show_pubkey_inline() {
     ui_blank
 }
 
+# Checklist para el otro extremo, con las claves de verdad ya
+# puestas. Cuando salen bytes y no vuelve ninguno, el fallo esta
+# siempre en el VPS, y adivinar cual de las cuatro causas es sale
+# mas caro que comprobarlas en orden.
+node_screen_vps_check() {
+    clear; node_title
+    ui_section "QUE COMPROBAR EN EL VPS" "cuando salen datos y no vuelve nada"
+    ui_blank
+
+    wg_ensure_public_key >/dev/null 2>&1
+    local mypub vpspub
+    mypub=$(cat "$NODE_PUB" 2>/dev/null)
+    vpspub="$CFG_VPS_PUBKEY"
+
+    echo -e "${UI_PAD}${DM}Ejecuta esto en la droplet, en este orden.${CR}"
+    echo -e "${UI_PAD}${DM}El primero que falle es la causa.${CR}"
+    ui_blank
+    ui_rule
+    ui_blank
+
+    echo -e "${UI_PAD}${YL}1 · ¿Esta el tunel levantado alli?${CR}"
+    echo -e "${UI_PAD}${WH}   sudo wg show ${NODE_IFACE}${CR}"
+    echo -e "${UI_PAD}${DM}   Si dice \"Unable to access interface\", el VPS no lo ha${CR}"
+    echo -e "${UI_PAD}${DM}   arrancado. Instalarlo solo lo deja habilitado, no en${CR}"
+    echo -e "${UI_PAD}${DM}   marcha: en el panel, GATEWAY RESIDENCIAL > [2].${CR}"
+    ui_blank
+
+    echo -e "${UI_PAD}${YL}2 · ¿Escucha en el puerto?${CR}"
+    echo -e "${UI_PAD}${WH}   sudo ss -lunp | grep ${CFG_VPS_PORT}${CR}"
+    ui_blank
+
+    echo -e "${UI_PAD}${YL}3 · ¿Llegan tus paquetes? (la prueba decisiva)${CR}"
+    echo -e "${UI_PAD}${WH}   sudo tcpdump -ni any udp port ${CFG_VPS_PORT}${CR}"
+    echo -e "${UI_PAD}${DM}   Deja esto corriendo y conecta desde aqui.${CR}"
+    echo -e "${UI_PAD}${DM}   · Si NO aparece nada  -> cortafuegos. UFW en el VPS${CR}"
+    echo -e "${UI_PAD}${DM}     o, mas probable, el firewall de DigitalOcean, que${CR}"
+    echo -e "${UI_PAD}${DM}     es externo y ningun script del droplet puede tocar.${CR}"
+    echo -e "${UI_PAD}${DM}     Abre UDP ${CFG_VPS_PORT} en el panel de DO.${CR}"
+    echo -e "${UI_PAD}${DM}   · Si SI aparecen     -> llegan y las descarta: son${CR}"
+    echo -e "${UI_PAD}${DM}     las claves. Sigue en el paso 4.${CR}"
+    ui_blank
+
+    echo -e "${UI_PAD}${YL}4 · ¿Coinciden las claves?${CR}"
+    echo -e "${UI_PAD}${WH}   sudo cat /etc/wireguard/wghome_droplet_public.key${CR}"
+    echo -e "${UI_PAD}${DM}   Debe dar exactamente:${CR}"
+    echo -e "${UI_PAD}${CY}   ${vpspub:-<sin definir>}${CR}"
+    ui_blank
+    echo -e "${UI_PAD}${WH}   sudo wg show ${NODE_IFACE} peers${CR}"
+    echo -e "${UI_PAD}${DM}   Debe dar exactamente:${CR}"
+    echo -e "${UI_PAD}${CY}   ${mypub:-<sin definir>}${CR}"
+    echo -e "${UI_PAD}${DM}   Si no esta, registrala con la opcion [6] del panel.${CR}"
+    ui_blank
+    ui_rule
+    ui_blank
+    ui_warn "WireGuard descarta en silencio lo que no puede descifrar."
+    echo -e "${UI_PAD}${DM}   Por eso una clave equivocada se ve igual que un${CR}"
+    echo -e "${UI_PAD}${DM}   puerto cerrado: en ambos casos, 0 B recibidos.${CR}"
+    ui_solid
+    ui_pause
+}
+
 node_screen_pubkey() {
     clear; node_title
     ui_section "CLAVE PUBLICA DE ESTE NODO" "para registrarla en el VPS"
@@ -2006,6 +2067,7 @@ node_diagnose() {
                 echo -e "${UI_PAD}${DM}     Eso apunta a UDP ${CFG_VPS_PORT} bloqueado en el VPS${CR}"
                 echo -e "${UI_PAD}${DM}     (UFW o cortafuegos de DigitalOcean) o a que la${CR}"
                 echo -e "${UI_PAD}${DM}     clave publica registrada alli no es la de este nodo.${CR}"
+                echo -e "${UI_PAD}${WH}     Usa la opcion [12]: te da los comandos exactos.${CR}"
             elif [ "${tx:-0}" = "0" ]; then
                 echo -e "${UI_PAD}${DM}     No sale ni un byte: revisa el peer y el endpoint.${CR}"
             fi
@@ -2195,11 +2257,12 @@ node_menu() {
         ui_opt "8" "VER IP DE SALIDA"  "la de tu casa"
         ui_opt "9" "REGISTRO"          "ultimos eventos"
         ui_opt "10" "DATOS DEL EQUIPO" "que soporta"
+        ui_opt "12" "COMPROBAR EL VPS"  "si no hay handshake"
         ui_blank
         ui_opt_danger "11" "ELIMINAR NODO" "borra todo"
         ui_opt "0" "SALIR"
         ui_solid
-        ui_prompt "Elige una opcion [0-11]"
+        ui_prompt "Elige una opcion [0-12]"
 
         case "$REPLY_UI" in
             1)  node_install ;;
@@ -2245,6 +2308,7 @@ node_menu() {
             8)  node_check_ip ;;
             9)  node_show_log ;;
             10) node_screen_device; ui_pause ;;
+            12) node_screen_vps_check ;;
             11) node_remove
                 node_is_configured || return 0 ;;
             0)  clear; return 0 ;;
