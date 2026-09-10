@@ -1591,8 +1591,20 @@ node_link_healthy() {
 NODE_GUARD_INTERVAL="30"
 
 node_guardian_loop() {
+    # En un movil con root se instalan dos vias de arranque —Termux:Boot
+    # y Magisk service.d— a proposito, para que si una falla quede la
+    # otra. El precio es que al reiniciar pueden dispararse las dos, y
+    # dos guardianes sobre el mismo tunel se pelean: uno lo levanta
+    # mientras el otro lo esta bajando. Gana el que llegue primero.
+    if node_guardian_is_running; then
+        _node_log "Guardian ya en marcha (pid $(cat "$NODE_PIDFILE" 2>/dev/null)): este se retira"
+        return 0
+    fi
     _node_log "Guardian iniciado (modo ${CFG_MODE}, pid $$)"
     echo $$ > "$NODE_PIDFILE" 2>/dev/null
+
+    # Si el proceso muere, que no quede un pidfile mintiendo.
+    trap 'rm -f "$NODE_PIDFILE" 2>/dev/null' EXIT INT TERM
 
     local last_uplink=""
     while true; do
@@ -2518,6 +2530,136 @@ EOF
     exec bash "$NODE_SELF"
 }
 
+
+# =========================================================
+# ARRANQUE AL ENCENDER — pantalla con comprobaciones
+# ---------------------------------------------------------
+# Activarlo no basta en Android: hace falta una app externa
+# (Termux:Boot) y que el sistema no mate el proceso. Decirlo
+# aqui evita descubrirlo tras el primer reinicio.
+# =========================================================
+
+# ¿Esta instalada la app Termux:Boot? Sin ella, la carpeta
+# ~/.termux/boot existe pero no la lee nadie.
+_node_termux_boot_installed() {
+    _node_detect_android || return 0
+    if command -v pm &>/dev/null; then
+        pm list packages 2>/dev/null | grep -q "com.termux.boot" && return 0
+        # pm respondio y no aparece: es una respuesta fiable
+        pm list packages 2>/dev/null | grep -q "com.termux" && return 1
+    fi
+    # Sin forma de saberlo con certeza
+    return 2
+}
+
+node_screen_autostart() {
+    clear; node_title
+    ui_section "ARRANQUE AL ENCENDER" "que el nodo se monte solo tras reiniciar"
+    ui_blank
+
+    local tag
+    autostart_is_on && tag="$(ui_tag_str on)" || tag="$(ui_tag_str off)"
+    ui_row2 "Estado" "$(autostart_is_on && echo activado || echo desactivado)" "Mecanismo" "${DEV_INIT}"
+    ui_blank
+    ui_rule
+    ui_blank
+
+    echo -e "${UI_PAD}${WH}Que ocurre al encender el telefono${CR}"
+    echo -e "${UI_PAD}${DM}  1. El sistema lanza el guardian.${CR}"
+    echo -e "${UI_PAD}${DM}  2. El guardian levanta el tunel contra el VPS.${CR}"
+    echo -e "${UI_PAD}${DM}  3. Instala el reenvio y el NAT hacia tu salida.${CR}"
+    echo -e "${UI_PAD}${DM}  4. Se queda vigilando: reconecta si se cae y rehace${CR}"
+    echo -e "${UI_PAD}${DM}     el NAT si cambias de wifi a datos.${CR}"
+    ui_blank
+    ui_rule
+    ui_blank
+
+    echo -e "${UI_PAD}${WH}Requisitos en este dispositivo${CR}"
+    ui_blank
+
+    case "$DEV_INIT" in
+        magisk)
+            ui_ok "Magisk service.d disponible."
+            echo -e "${UI_PAD}${DM}   Arranca antes de desbloquear la pantalla: es la via${CR}"
+            echo -e "${UI_PAD}${DM}   mas fiable. Se instalan las dos que haya, por si una${CR}"
+            echo -e "${UI_PAD}${DM}   falla; solo arrancara un guardian.${CR}"
+            ui_blank
+            ;;
+    esac
+
+    if _node_detect_android; then
+        _node_termux_boot_installed
+        case $? in
+            0) ui_ok "App Termux:Boot instalada." ;;
+            1) ui_err "Falta la app Termux:Boot."
+               echo -e "${UI_PAD}${DM}   Sin ella, la carpeta ~/.termux/boot no la lee nadie.${CR}"
+               echo -e "${UI_PAD}${DM}   Instalala desde F-Droid y ABRELA una vez.${CR}" ;;
+            *) ui_warn "No se pudo comprobar si Termux:Boot esta instalada."
+               echo -e "${UI_PAD}${DM}   Asegurate de tenerla desde F-Droid y de haberla${CR}"
+               echo -e "${UI_PAD}${DM}   abierto al menos una vez.${CR}" ;;
+        esac
+        ui_blank
+        ui_warn "Quita a Termux la optimizacion de bateria."
+        echo -e "${UI_PAD}${DM}   Ajustes > Apps > Termux > Bateria > Sin restricciones.${CR}"
+        echo -e "${UI_PAD}${DM}   Si no, Android matara el guardian al rato de apagar${CR}"
+        echo -e "${UI_PAD}${DM}   la pantalla y el nodo dejara de dar salida.${CR}"
+        ui_blank
+        echo -e "${UI_PAD}${DM}El guardian toma un wake lock para reducirlo, pero la${CR}"
+        echo -e "${UI_PAD}${DM}exclusion de bateria hay que darla a mano: ningun script${CR}"
+        echo -e "${UI_PAD}${DM}puede concedersela a si mismo.${CR}"
+    fi
+
+    ui_blank
+    ui_solid
+    if autostart_is_on; then
+        ui_opt "1" "DESACTIVAR" "no arrancar solo"
+    else
+        ui_opt "1" "ACTIVAR" "arrancar al encender"
+    fi
+    ui_opt "2" "PROBAR AHORA" "simula el arranque"
+    ui_opt "0" "VOLVER"
+    ui_solid
+    ui_prompt "Elige una opcion [0-2]"
+
+    case "$REPLY_UI" in
+        1)  if autostart_is_on; then
+                autostart_disable; ui_ok "Arranque automatico desactivado."
+            else
+                if autostart_enable; then
+                    ui_ok "Arranque automatico activado via ${DEV_INIT}."
+                    [ -f "$NODE_BOOT_FILE" ] && \
+                        echo -e "${UI_PAD}${DM}   Script: ${NODE_BOOT_FILE}${CR}"
+                else
+                    ui_err "No se pudo configurar en este sistema."
+                fi
+            fi
+            ui_pause ;;
+        2)  ui_blank
+            ui_info "Deteniendo el guardian y volviendo a arrancarlo como en un reinicio..."
+            node_guardian_stop
+            node_link_down quiet
+            sleep 2
+            if node_guardian_start; then
+                ui_ok "Guardian relanzado."
+                ui_info "Esperando a que monte el tunel..."
+                local w=0
+                while [ $w -lt 30 ]; do
+                    node_link_healthy && break
+                    sleep 2; w=$((w+2))
+                done
+                if node_link_healthy; then
+                    ui_ok "Montado solo en ${w}s. Al reiniciar hara esto mismo."
+                else
+                    ui_warn "No llego a montarse en ${w}s."
+                    echo -e "${UI_PAD}${DM}   Mira el registro (opcion 9) para ver donde falla.${CR}"
+                fi
+            else
+                ui_err "El guardian no arranco."
+            fi
+            ui_pause ;;
+    esac
+}
+
 # =========================================================
 # MENU PRINCIPAL
 # =========================================================
@@ -2599,9 +2741,7 @@ node_menu() {
                     node_guardian_start
                     sleep 1
                 fi ;;
-            3)  if autostart_is_on; then autostart_disable; ui_ok "Arranque automatico apagado."
-                else autostart_enable && ui_ok "Arranque automatico encendido." || ui_err "No disponible aqui."
-                fi; sleep 1 ;;
+            3)  node_screen_autostart ;;
             4)  if node_guardian_is_running; then node_guardian_stop; ui_ok "Guardian detenido."
                 else node_guardian_start && ui_ok "Guardian en marcha." || ui_err "No arranco."
                 fi; sleep 1 ;;

@@ -99,6 +99,21 @@ que fuerces resolución por TCP.
 | Termux con Magisk | `/data/adb/service.d/` — arranca antes de desbloquear |
 | Sin systemd | `@reboot` en cron |
 
+Actívalo desde la opción **3**, que además comprueba los requisitos del
+dispositivo y trae un **PROBAR AHORA**: detiene todo y lo vuelve a montar como
+si acabaras de reiniciar, para no descubrir en el próximo arranque que faltaba
+algo.
+
+En Android hacen falta dos cosas que ningún script puede darse a sí mismo:
+
+- **La app Termux:Boot** (F-Droid), abierta al menos una vez. Sin ella la
+  carpeta `~/.termux/boot` existe pero no la lee nadie.
+- **Quitar la optimización de batería a Termux**. Si no, Android mata el
+  guardián al rato de apagar la pantalla.
+
+Con Magisk se instalan las dos vías de arranque a la vez, por si una falla.
+Arrancará un solo guardián: el segundo detecta al primero y se retira.
+
 ### El guardián
 
 Levantar el túnel una vez al arrancar no basta en un móvil: cambia de wifi a
