@@ -160,6 +160,21 @@ NODE_VERSION="v1.0"
 NODE_IFACE="wg-home"
 NODE_SUBNET="10.77.77.0/24"
 NODE_VPS_WGIP="10.77.77.1"
+
+# El VPS da una red distinta a cada nodo para que varios puedan dar
+# salida a la vez: 10.77.77.x el primero, 10.77.78.x el segundo...
+# Todo se deduce de la direccion que nos asignaron, asi que basta
+# con guardar esa y no tres valores que podrian descuadrarse.
+#   10.77.78.2  ->  VPS 10.77.78.1, red 10.77.78.0/24
+_node_derive_net() {
+    local ip="${1:-$NODE_SELF_WGIP}" pref
+    case "$ip" in
+        10.77.*) pref="${ip%.*}" ;;
+        *) return 1 ;;
+    esac
+    NODE_VPS_WGIP="${pref}.1"
+    NODE_SUBNET="${pref}.0/24"
+}
 NODE_SELF_WGIP="10.77.77.2"   # por defecto; el VPS puede asignar otra
                               # cuando hay varios nodos registrados
 NODE_DEFAULT_PORT="51820"
@@ -478,7 +493,7 @@ node_cfg_load() {
     CFG_WG_MANAGER=$(_node_cfg_get WG_MANAGER)
     CFG_ADOPTED=$(_node_cfg_get ADOPTED)
     CFG_SELF_IP=$(_node_cfg_get SELF_IP)
-    [ -n "$CFG_SELF_IP" ] && NODE_SELF_WGIP="$CFG_SELF_IP"
+    [ -n "$CFG_SELF_IP" ] && { NODE_SELF_WGIP="$CFG_SELF_IP"; _node_derive_net; }
 
     # Un nodo adoptado usa el .conf que ya tenia, no el nuestro.
     [ -n "$CFG_WG_CONF" ] && NODE_WGCONF="$CFG_WG_CONF"
@@ -575,10 +590,14 @@ _wg_conf_is_node() {
     addr=$(_wg_conf_get "$file" "Address")
     [ -z "$addr" ] && return 1
     addr="${addr%%/*}"; addr="${addr%%,*}"; addr=$(printf '%s' "$addr" | tr -d '[:space:]')
+    # El VPS usa 10.77.77.x para el primer nodo, 10.77.78.x para el
+    # segundo, y asi hasta el decimosexto.
+    local third
     case "$addr" in
-        10.77.77.*) host="${addr##*.}" ;;
+        10.77.*) third=$(echo "$addr" | cut -d. -f3); host="${addr##*.}" ;;
         *) return 1 ;;
     esac
+    [ "$third" -ge 77 ] 2>/dev/null && [ "$third" -le 92 ] 2>/dev/null || return 1
     [ "$host" -ge 2 ] 2>/dev/null && [ "$host" -le 254 ] 2>/dev/null
 }
 
@@ -695,6 +714,7 @@ node_adopt_existing() {
         [ -n "$a" ] && NODE_SELF_WGIP="$a"
     fi
     CFG_SELF_IP="$NODE_SELF_WGIP"
+    _node_derive_net
 
     CFG_VPS_PUBKEY="$EX_PEER_PUB"
     if [ -n "$EX_ENDPOINT" ]; then
@@ -1965,10 +1985,18 @@ node_install_wireguard() {
     echo -e "${UI_PAD}${DM}deja el valor por defecto.${CR}"
     ui_ask "IP de este nodo en el tunel" "${NODE_SELF_WGIP}"
     case "$REPLY_UI" in
-        10.77.77.*) NODE_SELF_WGIP="$REPLY_UI" ;;
-        *) ui_warn "Fuera de 10.77.77.0/24; se deja ${NODE_SELF_WGIP}." ;;
+        10.77.*) NODE_SELF_WGIP="$REPLY_UI" ;;
+        *) ui_warn "Fuera del rango 10.77.x.x; se deja ${NODE_SELF_WGIP}." ;;
     esac
     CFG_SELF_IP="$NODE_SELF_WGIP"
+    _node_derive_net
+    ui_blank
+    ui_info "Red de este nodo: ${NODE_SUBNET} — VPS en ${NODE_VPS_WGIP}"
+    if [ "$CFG_VPS_PORT" = "$NODE_DEFAULT_PORT" ] && [ "$NODE_SELF_WGIP" != "10.77.77.2" ]; then
+        ui_warn "Ojo: no eres el primer nodo pero el puerto sigue siendo ${NODE_DEFAULT_PORT}."
+        echo -e "${UI_PAD}${DM}   Cada nodo tiene el suyo (51821, 51822...). Mira el${CR}"
+        echo -e "${UI_PAD}${DM}   panel del VPS: GESTIONAR NODOS te dice cual.${CR}"
+    fi
     if ! echo "$CFG_VPS_PUBKEY" | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
         ui_warn "Esa clave no tiene el formato base64 de 44 caracteres."
         ui_confirm "¿Continuar igualmente?" "n" || { ui_pause; return 1; }
@@ -2755,8 +2783,8 @@ node_menu() {
                     ui_ask "Puerto WireGuard" "$CFG_VPS_PORT";     CFG_VPS_PORT="$REPLY_UI"
                     ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"; CFG_VPS_PUBKEY="$REPLY_UI"
                     ui_ask "IP de este nodo" "$NODE_SELF_WGIP"
-                    case "$REPLY_UI" in 10.77.77.*) NODE_SELF_WGIP="$REPLY_UI";; esac
-                    CFG_SELF_IP="$NODE_SELF_WGIP"
+                    case "$REPLY_UI" in 10.77.*) NODE_SELF_WGIP="$REPLY_UI";; esac
+                    CFG_SELF_IP="$NODE_SELF_WGIP"; _node_derive_net
                     node_cfg_save; wg_write_conf
                     ui_blank; ui_ok "Datos actualizados."
                     if node_link_is_up && ui_confirm "¿Reiniciar el tunel para aplicarlos?" "s"; then

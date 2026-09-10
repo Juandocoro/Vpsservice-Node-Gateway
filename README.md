@@ -181,24 +181,36 @@ Puedes decir que no y conservar tu montaje intacto.
 
 ---
 
-## Varios nodos a la vez
+## Varios nodos, cada usuario por el suyo
 
 El VPS admite varios nodos registrados (PC, móvil, Raspberry…), cada uno con su
 propia IP dentro de `10.77.77.0/24`, y **no se ven entre sí**: el reenvío de
 `wg-home` hacia `wg-home` está cortado en la droplet.
 
-**Sólo uno puede ser la salida a Internet en cada momento.** Esto no es una
-decisión de diseño, es el protocolo: WireGuard reparte los paquetes por
-`AllowedIPs`, y dos peers no pueden declarar `0.0.0.0/0` a la vez — el segundo
-se lo quitaría al primero. Así que el nodo activo lleva `0.0.0.0/0` y el resto
-sólo su `/32`: siguen conectados y alcanzables, listos para relevarlo, pero no
-reciben el tráfico de Internet.
+**Varios nodos dan salida a la vez, y cada usuario sale por el que le asignes.**
+El usuario 1 por el PC, el usuario 2 por el móvil, simultáneamente.
 
-Cambiar de salida es instantáneo y no toca claves: en el panel del VPS,
-`GESTIONAR NODOS ▸ CAMBIAR SALIDA`.
+Para eso el VPS levanta **una interfaz WireGuard por nodo**. No es un capricho:
+el reparto de paquetes se hace por `AllowedIPs` y sólo un peer de una interfaz
+puede declarar `0.0.0.0/0`. Con una interfaz por nodo, cada cual tiene el suyo.
 
-Al dar de alta un nodo, el VPS le asigna una IP y te la muestra. **Configura esa
-misma IP aquí**, en el asistente — si pones otra, el enrutado no funciona.
+Todo se deduce del índice del nodo:
+
+| Nodo | Interfaz | Puerto | Red | Tabla | Marca |
+|---|---|---|---|---|---|
+| 1 | `wg-home` | 51820 | `10.77.77.x` | 200 | `0x77` |
+| 2 | `wg-home2` | 51821 | `10.77.78.x` | 202 | `0x772` |
+| 3 | `wg-home3` | 51822 | `10.77.79.x` | 203 | `0x773` |
+
+El reparto por usuario se hace marcando su tráfico por UID con la marca de su
+nodo; cada marca lleva a la tabla de ese nodo. Un usuario sin asignar sale por
+la IP del VPS.
+
+Al dar de alta un nodo, el panel te dice **su puerto y su IP**. Configura aquí
+esos valores exactos — el resto de la red se deduce solo de la IP.
+
+Los nodos no se ven entre sí: están en subredes distintas y además se corta el
+reenvío entre interfaces `wg-home*`.
 
 ## El VPS no puede hacer ping al nodo primero
 
