@@ -480,6 +480,12 @@ node_cfg_load() {
     [ -n "$CFG_WG_CONF" ] && NODE_WGCONF="$CFG_WG_CONF"
     [ -z "$CFG_WG_MANAGER" ] && CFG_WG_MANAGER="manual"
 
+    # Rutas de clave fijadas al adoptar: mandan sobre las de por
+    # defecto, porque son las que el VPS tiene registradas.
+    local pk
+    pk=$(_node_cfg_get PRIV_KEY); [ -n "$pk" ] && NODE_PRIV="$pk"
+    pk=$(_node_cfg_get PUB_KEY);  [ -n "$pk" ] && NODE_PUB="$pk"
+
     # Lo mismo con las claves: si el conf adoptado vive en otro
     # sitio, las claves del metodo manual estan junto a el.
     if [ -n "$CFG_WG_CONF" ] && [ ! -f "$NODE_PRIV" ]; then
@@ -513,6 +519,8 @@ AUTOSTART=${CFG_AUTOSTART}
 WG_CONF=${CFG_WG_CONF}
 WG_MANAGER=${CFG_WG_MANAGER}
 ADOPTED=${CFG_ADOPTED}
+PRIV_KEY=${NODE_PRIV}
+PUB_KEY=${NODE_PUB}
 EOF
     chmod 600 "$NODE_CONF" 2>/dev/null
 }
@@ -666,6 +674,16 @@ node_adopt_existing() {
     [ -n "$EX_PUB" ]  && NODE_PUB="$EX_PUB"
 
     [ -n "$EX_UNIT" ] && CFG_AUTOSTART="on" || CFG_AUTOSTART="off"
+
+    # Un montaje manual guarda la clave dentro del propio .conf y
+    # rara vez deja un fichero suelto. Se extrae ahora, no cuando
+    # haga falta: asi el nodo adoptado queda completo de entrada y
+    # no falla mas tarde con un error de fichero inexistente.
+    if wg_ensure_public_key; then
+        _node_log "Claves del nodo adoptado listas (${NODE_PRIV})"
+    else
+        _node_log "AVISO: nodo adoptado sin clave privada utilizable"
+    fi
 
     node_cfg_save
     _node_log "Configuracion previa adoptada: conf=${EX_WGCONF:-ninguno} unidad=${EX_UNIT:-ninguna} gestor=${CFG_WG_MANAGER}"
@@ -863,22 +881,107 @@ wg_has_handshake() {
 # en el log en vez de tirarse a /dev/null: cuando esto falla en
 # silencio, el sintoma que ve el usuario es "el VPS no responde al
 # ping", que manda a buscar el problema en el sitio equivocado.
+# Deja un .conf que 'wg setconf' acepte: solo las claves que
+# entiende el kernel. 'wg-quick strip' hace esto, pero depender de
+# el cuesta dos problemas en Android: no siempre esta instalado, y
+# su salida habria que pasarla por sustitucion de proceso <(...),
+# que el 'sh' de Android con el que corre 'su -c' no soporta.
+_wg_strip_conf() {
+    local src="$1" dst="$2"
+    # En Termux el conf es del propio usuario y se lee directo; en
+    # /etc/wireguard es 600 de root y hay que pasar por su. Probar
+    # primero la via directa evita un salto a 'su' innecesario y,
+    # sobre todo, funciona cuando no hay root en absoluto.
+    ( umask 077
+      if [ -r "$src" ]; then
+          cat "$src"
+      else
+          _root_run "cat '${src}' 2>/dev/null" 2>/dev/null
+      fi \
+        | grep -viE '^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=' \
+        > "$dst" ) 2>/dev/null
+    [ -s "$dst" ]
+}
+
+# 'wg set private-key' exige la RUTA de un fichero, no la clave.
+# Una config normal —y toda config adoptada— lleva la clave dentro
+# del propio .conf, asi que no hay tal fichero: de ahi el
+# "fopen: No such file or directory" que devolvia WireGuard.
+wg_ensure_private_key() {
+    [ -s "$NODE_PRIV" ] && return 0
+    local k=""
+    [ -n "$NODE_WGCONF" ] && k=$(_wg_conf_get "$NODE_WGCONF" "PrivateKey")
+    [ -z "$k" ] && return 1
+    mkdir -p "$NODE_HOME" 2>/dev/null
+    NODE_PRIV="${NODE_HOME}/node_private.key"
+    ( umask 077; printf '%s\n' "$k" > "$NODE_PRIV" )
+    chmod 600 "$NODE_PRIV" 2>/dev/null
+    _node_log "Clave privada extraida del conf a ${NODE_PRIV}"
+    return 0
+}
+
+# La publica se deriva de la privada; no hace falta guardarla en el
+# conf ni pedirsela al usuario.
+wg_ensure_public_key() {
+    [ -s "$NODE_PUB" ] && return 0
+    wg_ensure_private_key || return 1
+    NODE_PUB="${NODE_HOME}/node_public.key"
+    wg pubkey < "$NODE_PRIV" > "$NODE_PUB" 2>/dev/null
+    chmod 644 "$NODE_PUB" 2>/dev/null
+    [ -s "$NODE_PUB" ]
+}
+
 wg_apply_peer() {
-    local quiet="${1:-}" err=""
+    local quiet="${1:-}" err="" tmp
 
-    err=$(_root_run "wg setconf ${NODE_IFACE} <(wg-quick strip ${NODE_WGCONF})" 2>&1)
-    if wg_peer_configured; then return 0; fi
-    [ -n "$err" ] && _node_log "wg setconf (strip) fallo: ${err}"
+    # --- Via 1: volcar el conf entero, ya depurado ---
+    if [ -n "$NODE_WGCONF" ]; then
+        tmp="${NODE_HOME}/.setconf.$$"
+        if _wg_strip_conf "$NODE_WGCONF" "$tmp"; then
+            err=$(_root_run "wg setconf ${NODE_IFACE} '${tmp}'" 2>&1)
+            rm -f "$tmp" 2>/dev/null
+            wg_peer_configured && return 0
+            [ -n "$err" ] && _node_log "wg setconf fallo: ${err}"
+        else
+            rm -f "$tmp" 2>/dev/null
+            _node_log "No se pudo leer ${NODE_WGCONF} para setconf"
+        fi
+    fi
 
-    # Ultimo recurso: aplicar los campos uno a uno. 'wg setconf' con
-    # el fichero crudo rechaza Address, que no es una clave suya.
-    err=$(_root_run "wg set ${NODE_IFACE} private-key ${NODE_PRIV} peer ${CFG_VPS_PUBKEY} endpoint ${CFG_VPS_HOST}:${CFG_VPS_PORT} allowed-ips ${NODE_VPS_WGIP}/32 persistent-keepalive ${NODE_KEEPALIVE}" 2>&1)
-    if wg_peer_configured; then return 0; fi
+    # --- Via 2: campo a campo ---
+    # Necesita la clave privada en un fichero propio y saber cual es
+    # el VPS. Si falta cualquiera de las dos, decirlo es mas util que
+    # dejar que WireGuard responda con un error de bajo nivel.
+    if ! wg_ensure_private_key; then
+        _node_log "Sin clave privada utilizable (ni fichero ni dentro del conf)"
+        [ -z "$quiet" ] && {
+            ui_err "No hay clave privada para este nodo."
+            echo -e "${UI_PAD}${DM}   Ni ${NODE_PRIV}${CR}"
+            echo -e "${UI_PAD}${DM}   ni una linea PrivateKey dentro de ${NODE_WGCONF:-<sin conf>}.${CR}"
+            echo -e "${UI_PAD}${DM}   Reconfigura con la opcion 1 para generar un par nuevo${CR}"
+            echo -e "${UI_PAD}${DM}   (tendras que registrarlo de nuevo en el VPS).${CR}"
+        }
+        return 1
+    fi
 
-    [ -n "$err" ] && _node_log "wg set fallo: ${err}"
-    [ -z "$quiet" ] && [ -n "$err" ] && {
+    if [ -z "$CFG_VPS_PUBKEY" ] || [ -z "$CFG_VPS_HOST" ]; then
+        _node_log "Faltan datos del VPS: pubkey='${CFG_VPS_PUBKEY}' host='${CFG_VPS_HOST}'"
+        [ -z "$quiet" ] && {
+            ui_err "Faltan datos del VPS."
+            echo -e "${UI_PAD}${DM}   Clave publica: ${CFG_VPS_PUBKEY:-<vacia>}${CR}"
+            echo -e "${UI_PAD}${DM}   Host: ${CFG_VPS_HOST:-<vacio>}${CR}"
+            echo -e "${UI_PAD}${DM}   Complétalos con la opcion 6 del menu.${CR}"
+        }
+        return 1
+    fi
+
+    err=$(_root_run "wg set ${NODE_IFACE} private-key '${NODE_PRIV}' peer '${CFG_VPS_PUBKEY}' endpoint '${CFG_VPS_HOST}:${CFG_VPS_PORT}' allowed-ips ${NODE_VPS_WGIP}/32 persistent-keepalive ${NODE_KEEPALIVE}" 2>&1)
+    wg_peer_configured && return 0
+
+    _node_log "wg set fallo: ${err}"
+    [ -z "$quiet" ] && {
         ui_err "WireGuard rechazo la configuracion:"
-        echo -e "${UI_PAD}${DM}   ${err}${CR}"
+        echo -e "${UI_PAD}${DM}   ${err:-sin detalle}${CR}"
     }
     return 1
 }
@@ -1770,6 +1873,7 @@ node_screen_pubkey() {
             ui_err "No hay clave SSH. Reconfigura con la opcion 1."
         fi
     else
+        wg_ensure_public_key >/dev/null 2>&1
         if [ -f "$NODE_PUB" ]; then
             ui_row2 "Este nodo" "$NODE_SELF_WGIP" "VPS" "$NODE_VPS_WGIP"
             ui_blank
