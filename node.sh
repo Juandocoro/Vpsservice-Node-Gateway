@@ -821,6 +821,57 @@ wg_generate_keys() {
     [ -s "$NODE_PUB" ]
 }
 
+# Importa un par de claves ya existente. Es la salida cuando el VPS
+# ya tiene registrado a este nodo: su wg_home.sh admite UN solo peer,
+# asi que registrar una clave nueva borra la anterior. Recuperando la
+# identidad antigua aqui, el VPS no hay que tocarlo.
+wg_import_key() {
+    ui_blank
+    echo -e "${UI_PAD}${DM}Pega la clave privada del nodo, o la ruta de un fichero${CR}"
+    echo -e "${UI_PAD}${DM}que la contenga (p.ej. /etc/wireguard/home_private.key${CR}"
+    echo -e "${UI_PAD}${DM}o un wg-home.conf: se extrae de dentro).${CR}"
+    ui_blank
+    ui_ask "Clave o ruta" ""
+    local inp="$REPLY_UI" key=""
+    [ -z "$inp" ] && { ui_err "Nada que importar."; return 1; }
+
+    # Fichero legible, fichero solo de root, o la clave pegada tal cual.
+    if [ -f "$inp" ]; then
+        key=$(_wg_conf_get "$inp" "PrivateKey")
+        [ -z "$key" ] && key=$(head -1 "$inp" 2>/dev/null)
+    elif _root_run "test -f '${inp}'" &>/dev/null; then
+        key=$(_wg_conf_get "$inp" "PrivateKey")
+        [ -z "$key" ] && key=$(_root_run "head -1 '${inp}'" 2>/dev/null)
+    else
+        key="$inp"
+    fi
+    key=$(printf '%s' "$key" | tr -d '[:space:]')
+
+    if ! echo "$key" | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
+        ui_err "Eso no es una clave WireGuard (44 caracteres base64)."
+        return 1
+    fi
+
+    mkdir -p "$NODE_HOME" 2>/dev/null
+    ( umask 077; printf '%s\n' "$key" > "$NODE_PRIV" )
+    chmod 600 "$NODE_PRIV" 2>/dev/null
+    wg pubkey < "$NODE_PRIV" > "$NODE_PUB" 2>/dev/null
+    chmod 644 "$NODE_PUB" 2>/dev/null
+    if [ ! -s "$NODE_PUB" ]; then
+        ui_err "WireGuard no acepto esa clave."
+        rm -f "$NODE_PRIV" "$NODE_PUB" 2>/dev/null
+        return 1
+    fi
+
+    _node_log "Par de claves importado (identidad previa recuperada)"
+    ui_blank
+    ui_ok "Clave importada. Su publica es:"
+    echo -e "${UI_PAD}${WH}$(cat "$NODE_PUB")${CR}"
+    echo -e "${UI_PAD}${DM}Si esta es la que el VPS ya tiene registrada, no hay${CR}"
+    echo -e "${UI_PAD}${DM}que tocar nada alli.${CR}"
+    return 0
+}
+
 # Devuelve las rutas de trabajo a las nuestras. Reconfigurar desde
 # cero no puede heredar los punteros de una adopcion anterior: si
 # lo hiciera, escribiriamos claves nuevas en un sitio y buscariamos
@@ -1835,9 +1886,36 @@ node_install_wireguard() {
         ui_confirm "¿Continuar igualmente?" "n" || { ui_pause; return 1; }
     fi
 
-    if ! wg_generate_keys; then
-        ui_pause; return 1
+    # Generar claves nuevas rompe el emparejamiento: el VPS solo
+    # guarda un peer. Se pregunta antes, no despues.
+    ui_blank
+    ui_rule
+    ui_blank
+    echo -e "${UI_PAD}${WH}Claves de este nodo${CR}"
+    ui_blank
+    if [ -s "$NODE_PRIV" ]; then
+        echo -e "${UI_PAD}${DM}Ya hay un par de claves en este dispositivo.${CR}"
     fi
+    ui_opt "1" "GENERAR NUEVAS" "hay que registrarlas"
+    ui_opt "2" "IMPORTAR EXISTENTE" "conserva el VPS"
+    ui_blank
+    echo -e "${UI_PAD}${DM}Elige 2 si este nodo ya funcionaba antes y quieres${CR}"
+    echo -e "${UI_PAD}${DM}recuperar su identidad sin tocar el VPS.${CR}"
+    ui_blank
+    ui_ask "Opcion [1-2]" "1"
+
+    if [ "$REPLY_UI" = "2" ]; then
+        until wg_import_key; do
+            ui_blank
+            ui_confirm "¿Reintentar la importacion?" "s" || { ui_pause; return 1; }
+        done
+    else
+        rm -f "$NODE_PRIV" "$NODE_PUB" 2>/dev/null
+        if ! wg_generate_keys; then
+            ui_pause; return 1
+        fi
+    fi
+
     node_cfg_save
     wg_write_conf
     _node_log "Nodo configurado en modo WireGuard contra ${CFG_VPS_HOST}"
@@ -1959,6 +2037,12 @@ node_screen_vps_check() {
     ui_warn "WireGuard descarta en silencio lo que no puede descifrar."
     echo -e "${UI_PAD}${DM}   Por eso una clave equivocada se ve igual que un${CR}"
     echo -e "${UI_PAD}${DM}   puerto cerrado: en ambos casos, 0 B recibidos.${CR}"
+    ui_blank
+    ui_warn "El VPS admite UN solo nodo a la vez."
+    echo -e "${UI_PAD}${DM}   Su [6] no añade peers: reescribe el unico que hay.${CR}"
+    echo -e "${UI_PAD}${DM}   Si antes funcionaba con otro equipo, registrar este${CR}"
+    echo -e "${UI_PAD}${DM}   desconecta aquel. Para recuperar la identidad que el${CR}"
+    echo -e "${UI_PAD}${DM}   VPS ya conoce, importa su clave: opcion [1] > 2.${CR}"
     ui_solid
     ui_pause
 }
