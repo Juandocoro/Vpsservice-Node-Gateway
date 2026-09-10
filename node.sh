@@ -821,6 +821,30 @@ wg_write_conf() {
 
 wg_is_up() { _root_run "ip link show ${NODE_IFACE} 2>/dev/null" &>/dev/null; }
 
+# Que la interfaz exista NO significa que este configurada. Si un
+# 'wg setconf' fallo, queda una interfaz viva y sin peer: sube el
+# tunel en el menu, no da error, y nunca hay handshake. Este es
+# justo el estado que hace parecer que "el VPS no responde".
+wg_peer_configured() {
+    [ -n "$(_root_run "wg show ${NODE_IFACE} peers 2>/dev/null" 2>/dev/null)" ]
+}
+
+# El endpoint del VPS resuelto y fijado en la interfaz.
+wg_endpoint_known() {
+    local ep
+    ep=$(_root_run "wg show ${NODE_IFACE} endpoints 2>/dev/null" 2>/dev/null | awk '{print $2}' | head -1)
+    [ -n "$ep" ] && [ "$ep" != "(none)" ]
+}
+
+# Bytes cifrados enviados y recibidos. La relacion entre ambos es
+# el diagnostico mas util que existe aqui:
+#   tx > 0 y rx = 0  -> nuestros handshakes salen y nada vuelve:
+#                       puerto UDP bloqueado o clave equivocada.
+#   tx = 0           -> ni siquiera intentamos: falta el peer.
+wg_transfer() {
+    _root_run "wg show ${NODE_IFACE} transfer 2>/dev/null" 2>/dev/null | head -1 | awk '{print $2" "$3}'
+}
+
 wg_handshake_age() {
     local ts now
     ts=$(_root_run "wg show ${NODE_IFACE} latest-handshakes 2>/dev/null" 2>/dev/null | awk '{print $2}' | head -1)
@@ -835,6 +859,30 @@ wg_has_handshake() {
     [ "$age" -ge 0 ] 2>/dev/null && [ "$age" -lt 180 ]
 }
 
+# Vuelca la configuracion sobre la interfaz. Los errores se guardan
+# en el log en vez de tirarse a /dev/null: cuando esto falla en
+# silencio, el sintoma que ve el usuario es "el VPS no responde al
+# ping", que manda a buscar el problema en el sitio equivocado.
+wg_apply_peer() {
+    local quiet="${1:-}" err=""
+
+    err=$(_root_run "wg setconf ${NODE_IFACE} <(wg-quick strip ${NODE_WGCONF})" 2>&1)
+    if wg_peer_configured; then return 0; fi
+    [ -n "$err" ] && _node_log "wg setconf (strip) fallo: ${err}"
+
+    # Ultimo recurso: aplicar los campos uno a uno. 'wg setconf' con
+    # el fichero crudo rechaza Address, que no es una clave suya.
+    err=$(_root_run "wg set ${NODE_IFACE} private-key ${NODE_PRIV} peer ${CFG_VPS_PUBKEY} endpoint ${CFG_VPS_HOST}:${CFG_VPS_PORT} allowed-ips ${NODE_VPS_WGIP}/32 persistent-keepalive ${NODE_KEEPALIVE}" 2>&1)
+    if wg_peer_configured; then return 0; fi
+
+    [ -n "$err" ] && _node_log "wg set fallo: ${err}"
+    [ -z "$quiet" ] && [ -n "$err" ] && {
+        ui_err "WireGuard rechazo la configuracion:"
+        echo -e "${UI_PAD}${DM}   ${err}${CR}"
+    }
+    return 1
+}
+
 # Levanta la interfaz sin wg-quick. wg-quick da por hecho un
 # Linux de escritorio (resolvconf, sysctl, rutas en main) y en
 # Android se rompe; montarla a mano es identico y portable.
@@ -843,8 +891,20 @@ wg_tunnel_up() {
     [ -f "$NODE_WGCONF" ] || { [ -z "$quiet" ] && ui_err "Falta ${NODE_WGCONF}. Reconfigura (opcion 1)."; return 1; }
 
     if wg_is_up; then
-        [ -z "$quiet" ] && ui_warn "El tunel ya estaba activo."
-        return 0
+        if wg_peer_configured; then
+            [ -z "$quiet" ] && ui_warn "El tunel ya estaba activo."
+            return 0
+        fi
+        # Interfaz huerfana: existe pero sin peer. Se reconfigura en
+        # lugar de devolver un exito falso.
+        [ -z "$quiet" ] && ui_warn "La interfaz existia sin peer configurado. Reparando..."
+        _node_log "Interfaz ${NODE_IFACE} sin peer — reconfigurando"
+        wg_apply_peer "$quiet"
+        _root_try "ip link set up dev ${NODE_IFACE}"
+        sleep 1
+        wg_peer_configured && { [ -z "$quiet" ] && ui_ok "Peer restaurado."; return 0; }
+        [ -z "$quiet" ] && ui_err "No se pudo configurar el peer."
+        return 1
     fi
 
     # Si el montaje previo ya lo gestiona wg-quick, se usa su
@@ -877,25 +937,33 @@ wg_tunnel_up() {
         }
     fi
 
-    # setconf necesita el fichero legible por root; en Termux el
-    # conf vive bajo $PREFIX, que root si puede leer.
-    _root_try "wg setconf ${NODE_IFACE} <(wg-quick strip ${NODE_WGCONF})" || \
-        _root_try "wg setconf ${NODE_IFACE} ${NODE_WGCONF}" || {
-            # Ultimo recurso: aplicar los campos uno a uno. wg setconf
-            # rechaza claves que no entiende (Address no es suya).
-            _root_try "wg set ${NODE_IFACE} private-key ${NODE_PRIV} peer ${CFG_VPS_PUBKEY} endpoint ${CFG_VPS_HOST}:${CFG_VPS_PORT} allowed-ips ${NODE_VPS_WGIP}/32 persistent-keepalive ${NODE_KEEPALIVE}"
-        }
+    wg_apply_peer "$quiet"
 
     _root_try "ip address add ${NODE_SELF_WGIP}/24 dev ${NODE_IFACE}"
     _root_try "ip link set up dev ${NODE_IFACE}"
 
     sleep 1
-    if wg_is_up; then
+    if wg_is_up && wg_peer_configured; then
         _node_log "Tunel ${NODE_IFACE} levantado hacia ${CFG_VPS_HOST}:${CFG_VPS_PORT}"
-        [ -z "$quiet" ] && ui_ok "Tunel ${NODE_IFACE} activo."
+        [ -z "$quiet" ] && {
+            ui_ok "Tunel ${NODE_IFACE} activo."
+            # El handshake no es instantaneo, pero si a los pocos
+            # segundos no llega, avisamos aqui y no dentro de media
+            # hora cuando el usuario pruebe el ping desde el VPS.
+            ui_info "Esperando handshake con el VPS..."
+            local w=0
+            while [ $w -lt 12 ]; do
+                wg_has_handshake && { ui_ok "Handshake recibido: el VPS ya sabe donde estas."; return 0; }
+                sleep 1; w=$((w+1))
+            done
+            ui_warn "Sin handshake tras ${w}s."
+            echo -e "${UI_PAD}${DM}   Hasta que lo haya, el VPS NO puede hacerte ping:${CR}"
+            echo -e "${UI_PAD}${DM}   no conoce tu direccion hasta que tu le hablas.${CR}"
+            echo -e "${UI_PAD}${DM}   Usa la opcion 7 para ver donde se corta.${CR}"
+        }
         return 0
     fi
-    [ -z "$quiet" ] && ui_err "La interfaz no llego a levantarse."
+    [ -z "$quiet" ] && ui_err "La interfaz no llego a levantarse con peer."
     return 1
 }
 
@@ -1235,7 +1303,7 @@ EOF
 # =========================================================
 node_link_is_up() {
     case "$CFG_MODE" in
-        wireguard) wg_is_up ;;
+        wireguard) wg_is_up && wg_peer_configured ;;
         socks)     socks_is_up ;;
         *)         return 1 ;;
     esac
@@ -1743,7 +1811,16 @@ node_diagnose() {
     fi
 
     # 2 — Enlace levantado
-    if node_link_is_up; then
+    if [ "$CFG_MODE" = "wireguard" ]; then
+        if wg_is_up && wg_peer_configured; then
+            _chk_ok "2/5 interfaz ${NODE_IFACE} activa y con peer."
+        elif wg_is_up; then
+            _chk_fail "2/5 la interfaz existe pero NO tiene peer configurado."
+            echo -e "${UI_PAD}${DM}     Sube el tunel de nuevo (opcion 2): se repara solo.${CR}"
+        else
+            _chk_fail "2/5 la interfaz ${NODE_IFACE} no existe."
+        fi
+    elif node_link_is_up; then
         _chk_ok "2/5 enlace activo."
     else
         _chk_fail "2/5 el enlace esta caido."
@@ -1758,7 +1835,23 @@ node_diagnose() {
         elif [ "$age" -ge 0 ] 2>/dev/null; then
             _chk_fail "3/5 ultimo handshake hace ${age}s (obsoleto)."
         else
-            _chk_fail "3/5 nunca hubo handshake. ¿Registraste la clave en el VPS?"
+            _chk_fail "3/5 nunca hubo handshake."
+            # Aqui esta la explicacion del sintoma clasico. El VPS no
+            # lleva Endpoint en su bloque [Peer] — no puede llevarlo,
+            # porque este equipo esta tras CGNAT y no tiene IP fija.
+            # Solo aprende donde estamos cuando NOSOTROS le hablamos.
+            echo -e "${UI_PAD}${DM}     Mientras no haya handshake, el VPS no sabe donde${CR}"
+            echo -e "${UI_PAD}${DM}     estas y su 'ping 10.77.77.2' NO puede funcionar.${CR}"
+            local tr rx tx
+            tr=$(wg_transfer); rx=$(echo "$tr" | awk '{print $1}'); tx=$(echo "$tr" | awk '{print $2}')
+            if [ -n "$tx" ] && [ "$tx" != "0" ] && [ "${rx:-0}" = "0" ]; then
+                echo -e "${UI_PAD}${RD}     Salen datos (${tx}) y no vuelve nada (${rx}).${CR}"
+                echo -e "${UI_PAD}${DM}     Eso apunta a UDP ${CFG_VPS_PORT} bloqueado en el VPS${CR}"
+                echo -e "${UI_PAD}${DM}     (UFW o cortafuegos de DigitalOcean) o a que la${CR}"
+                echo -e "${UI_PAD}${DM}     clave publica registrada alli no es la de este nodo.${CR}"
+            elif [ "${tx:-0}" = "0" ]; then
+                echo -e "${UI_PAD}${DM}     No sale ni un byte: revisa el peer y el endpoint.${CR}"
+            fi
         fi
     else
         if socks_is_up; then
@@ -1770,7 +1863,10 @@ node_diagnose() {
 
     # 4 — Alcance del otro extremo
     if [ "$CFG_MODE" = "wireguard" ]; then
-        if ping -c 2 -W 3 "$NODE_VPS_WGIP" &>/dev/null; then
+        if ! wg_endpoint_known; then
+            _chk_fail "4/5 la interfaz no tiene endpoint del VPS resuelto."
+            echo -e "${UI_PAD}${DM}     Revisa que ${CFG_VPS_HOST}:${CFG_VPS_PORT} sea correcto.${CR}"
+        elif ping -c 2 -W 3 "$NODE_VPS_WGIP" &>/dev/null; then
             _chk_ok "4/5 el VPS responde en ${NODE_VPS_WGIP}."
         else
             _chk_fail "4/5 sin respuesta de ${NODE_VPS_WGIP}."

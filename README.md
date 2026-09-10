@@ -166,6 +166,34 @@ Puedes decir que no y conservar tu montaje intacto.
 
 ---
 
+## El VPS no puede hacer ping al nodo primero
+
+Es la confusión más común, y **no es un fallo**. El bloque `[Peer]` que genera
+el VPS no lleva `Endpoint` — no puede llevarlo, porque el nodo está tras
+CGNAT, sin IP fija ni puertos abiertos. El VPS es **puramente pasivo**:
+aprende dónde está el nodo sólo cuando el nodo le habla.
+
+Consecuencia: hasta que el nodo complete un handshake, `ping 10.77.77.2`
+desde el VPS **no puede funcionar**. `wg show` en el VPS lo dice claramente —
+`endpoint: (none)` y `latest handshake:` vacío.
+
+Así que un ping sin respuesta no significa "el nodo no contesta", sino
+**"el nodo nunca ha llamado"**. El problema está siempre en el lado del nodo:
+
+```bash
+# En el nodo
+sudo bash node.sh --status     # ¿activo?
+nodo                           # opción 7: diagnóstico
+```
+
+El diagnóstico distingue los casos que de otro modo se confunden:
+
+| Señal | Significado |
+|---|---|
+| La interfaz existe pero sin peer | un `wg setconf` falló en silencio; la opción 2 lo repara |
+| `tx > 0` y `rx = 0` | los handshakes salen y nada vuelve: **UDP 51820 bloqueado** en el VPS (UFW o cortafuegos de DigitalOcean), o la clave pública registrada allí no es la de este nodo |
+| `tx = 0` | no sale ni un byte: falta el peer o el endpoint es incorrecto |
+
 ## Detalles que suelen morder
 
 - **`AllowedIPs = 10.77.77.1/32`**, no `0.0.0.0/0`. El nodo *presta* su salida,
