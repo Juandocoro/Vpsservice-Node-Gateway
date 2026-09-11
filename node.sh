@@ -2060,30 +2060,46 @@ node_install_socks() {
     ui_ask "Puerto SSH del VPS" "${CFG_VPS_PORT:-22}"
     CFG_VPS_PORT="$REPLY_UI"
 
-    ui_ask "Usuario SSH del VPS" "${CFG_SSH_USER:-root}"
-    CFG_SSH_USER="$REPLY_UI"
+    # IMPORTANTE: el usuario y el puerto SOCKS NO son libres si usas el
+    # panel. Al hacer "GESTIONAR NODOS > REGISTRAR NODO MOVIL" el panel
+    # reserva el nodo y te muestra el usuario (snodeN) y el puerto SOCKS
+    # exactos que hay que poner aqui. Si no coinciden, el movil publica
+    # el SOCKS en un puerto y el VPS lo busca en otro: no habra internet.
+    ui_blank
+    ui_warn "Usa el usuario y el puerto SOCKS que te muestra el PANEL"
+    echo -e "${UI_PAD}${DM}   (VPS: GATEWAY RESIDENCIAL > GESTIONAR NODOS >${CR}"
+    echo -e "${UI_PAD}${DM}    REGISTRAR NODO MOVIL). Suelen ser snodeN y 1108N.${CR}"
+    ui_blank
 
-    ui_ask "Puerto SOCKS a publicar en el VPS" "${CFG_SOCKS_PORT:-1080}"
+    ui_ask "Usuario SSH que indica el panel (ej: snode1)" "${CFG_SSH_USER}"
+    CFG_SSH_USER="$REPLY_UI"
+    [ -z "$CFG_SSH_USER" ] && { ui_err "Sin usuario no hay tunel."; ui_pause; return 1; }
+
+    ui_ask "Puerto SOCKS que indica el panel (ej: 11081)" "${CFG_SOCKS_PORT}"
     CFG_SOCKS_PORT="$REPLY_UI"
+    [ -z "$CFG_SOCKS_PORT" ] && { ui_err "Sin puerto SOCKS no hay salida."; ui_pause; return 1; }
 
     socks_generate_key || { ui_err "No se pudo generar la clave SSH."; ui_pause; return 1; }
     node_cfg_save
     _node_log "Nodo configurado en modo SOCKS contra ${CFG_SSH_USER}@${CFG_VPS_HOST}"
 
-    # La receta se deja en disco: es larga y hay que copiarla al VPS.
+    # La receta manual queda en disco por si se monta el VPS SIN el panel.
+    # Con el panel NO se usa: alli el lado del VPS lo hace REGISTRAR NODO
+    # MOVIL, y correr esta receta ademas crearia reglas que chocan.
     socks_vps_recipe > "${NODE_HOME}/vps-setup.txt"
     chmod 600 "${NODE_HOME}/vps-setup.txt"
 
     ui_blank
     ui_ok "Clave SSH del nodo generada."
     ui_blank
-    echo -e "${UI_PAD}${YL}Copia esta linea en el VPS (~/.ssh/authorized_keys):${CR}"
+    echo -e "${UI_PAD}${YL}Registrala en el PANEL del VPS:${CR}"
+    echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL > GESTIONAR NODOS > REGISTRAR NODO MOVIL${CR}"
+    echo -e "${UI_PAD}${DM}(con el mismo nombre) y pega esta clave publica:${CR}"
     ui_blank
     echo -e "${UI_PAD}${WH}$(cat "${NODE_SSH_KEY}.pub" 2>/dev/null)${CR}"
     ui_blank
-    ui_info "Receta completa del VPS guardada en:"
-    echo -e "${UI_PAD}${DM}   ${NODE_HOME}/vps-setup.txt${CR}"
-    echo -e "${UI_PAD}${DM}   (opcion 5 del menu la vuelve a mostrar)${CR}"
+    ui_info "Si montas el VPS a mano (sin panel), la receta esta en:"
+    echo -e "${UI_PAD}${DM}   ${NODE_HOME}/vps-setup.txt  (opcion 5 la vuelve a mostrar)${CR}"
     return 0
 }
 
@@ -2102,8 +2118,42 @@ node_show_pubkey_inline() {
 # mas caro que comprobarlas en orden.
 node_screen_vps_check() {
     clear; node_title
-    ui_section "QUE COMPROBAR EN EL VPS" "cuando salen datos y no vuelve nada"
+    ui_section "QUE COMPROBAR EN EL VPS" "cuando el nodo conecta y no hay salida"
     ui_blank
+
+    # En modo SOCKS el VPS no habla WireGuard: las comprobaciones son otras.
+    if [ "$CFG_MODE" = "socks" ]; then
+        socks_paths
+        echo -e "${UI_PAD}${DM}El panel del VPS trae un diagnostico que prueba ESTE${CR}"
+        echo -e "${UI_PAD}${DM}metodo salto a salto (incluida una salida real por el${CR}"
+        echo -e "${UI_PAD}${DM}movil). Alli lo ves todo:${CR}"
+        echo -e "${UI_PAD}${WH}   GATEWAY RESIDENCIAL > DIAGNOSTICO${CR}"
+        ui_blank
+        ui_rule
+        echo -e "${UI_PAD}${YL}Lo que TIENE que cuadrar entre nodo y panel:${CR}"
+        echo -e "${UI_PAD}${GR}▪${CR} Usuario     : ${WH}${CFG_SSH_USER:-?}${CR}  ${DM}(el snodeN del panel)${CR}"
+        echo -e "${UI_PAD}${GR}▪${CR} Puerto SOCKS: ${WH}${CFG_SOCKS_PORT:-?}${CR}  ${DM}(el 1108N del panel)${CR}"
+        echo -e "${UI_PAD}${DM}Si no son EXACTOS los que muestra REGISTRAR NODO MOVIL,${CR}"
+        echo -e "${UI_PAD}${DM}el movil publica el SOCKS en un puerto y el VPS lo busca${CR}"
+        echo -e "${UI_PAD}${DM}en otro: conecta pero no navega. Reconfigura con [1].${CR}"
+        ui_blank
+        ui_rule
+        echo -e "${UI_PAD}${YL}Comprobar a mano en el VPS (como root):${CR}"
+        echo -e "${UI_PAD}${YL}1 · ¿Llego el tunel del movil?${CR}"
+        echo -e "${UI_PAD}${WH}   ss -tlnp | grep ${CFG_SOCKS_PORT:-1108N}${CR}"
+        echo -e "${UI_PAD}${DM}   Debe haber algo escuchando en 127.0.0.1:${CFG_SOCKS_PORT:-1108N}.${CR}"
+        echo -e "${UI_PAD}${YL}2 · ¿Esta redsocks vivo?${CR}"
+        echo -e "${UI_PAD}${WH}   systemctl status 'redsocks-node*'${CR}"
+        echo -e "${UI_PAD}${YL}3 · ¿Esta encendida la salida residencial?${CR}"
+        echo -e "${UI_PAD}${DM}   En el panel: GATEWAY RESIDENCIAL, salida ACTIVA, y el${CR}"
+        echo -e "${UI_PAD}${DM}   usuario asignado a este nodo.${CR}"
+        ui_blank
+        ui_warn "El SOCKS transporta solo TCP: el DNS (UDP) resuelve en el"
+        echo -e "${UI_PAD}${DM}   VPS. Las conexiones TCP salen por el movil.${CR}"
+        ui_solid
+        ui_pause
+        return
+    fi
 
     wg_ensure_public_key >/dev/null 2>&1
     local mypub vpspub
@@ -2171,15 +2221,19 @@ node_screen_pubkey() {
     if [ "$CFG_MODE" = "socks" ]; then
         socks_paths
         if [ -f "${NODE_SSH_KEY}.pub" ]; then
-            echo -e "${UI_PAD}${DM}Clave SSH — va en ~/.ssh/authorized_keys del VPS:${CR}"
+            echo -e "${UI_PAD}${YL}Registrala en el PANEL del VPS:${CR}"
+            echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL > GESTIONAR NODOS >${CR}"
+            echo -e "${UI_PAD}${DM}REGISTRAR NODO MOVIL, y pega esta clave:${CR}"
             ui_blank
             echo -e "${UI_PAD}${WH}$(cat "${NODE_SSH_KEY}.pub")${CR}"
             ui_blank
-            ui_rule
-            ui_info "Receta completa para el VPS:"
-            echo -e "${UI_PAD}${DM}   ${NODE_HOME}/vps-setup.txt${CR}"
+            echo -e "${UI_PAD}${DM}Usuario: ${WH}${CFG_SSH_USER:-?}${DM}   Puerto SOCKS: ${WH}${CFG_SOCKS_PORT:-?}${CR}"
+            echo -e "${UI_PAD}${DM}(deben ser los que muestra el panel)${CR}"
             ui_blank
-            if ui_confirm "¿Mostrarla en pantalla?" "n"; then
+            ui_rule
+            ui_info "Solo si montas el VPS A MANO (sin panel):"
+            echo -e "${UI_PAD}${DM}   receta en ${NODE_HOME}/vps-setup.txt${CR}"
+            if ui_confirm "¿Mostrar la receta manual?" "n"; then
                 echo ""
                 cat "${NODE_HOME}/vps-setup.txt" 2>/dev/null | sed 's/^/  /'
             fi

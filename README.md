@@ -79,12 +79,26 @@ que fuerces resolución por TCP.
 
 ### Modo B — SOCKS inverso
 
-1. **En el nodo:** `nodo` ▸ `[1]`. Pide host, puerto SSH, usuario y puerto SOCKS.
-2. El nodo genera una clave SSH y escribe la receta del VPS en
-   `<config>/vps-setup.txt` (también en `[5]`).
-3. **En el VPS:** ejecuta esa receta. Autoriza la clave, instala `redsocks` y
-   redirige a él lo que el panel marca con `0x77`.
+Con el panel (recomendado). El lado del VPS lo monta el panel; aquí solo se
+genera la llave.
+
+1. **En el VPS:** panel `menu` ▸ GATEWAY RESIDENCIAL ▸ GESTIONAR NODOS ▸
+   REGISTRAR NODO MOVIL. Reserva el nodo y te muestra el **usuario** (`snodeN`)
+   y el **puerto SOCKS** (`1108N`) exactos.
+2. **En el nodo:** `nodo` ▸ `[1]`. Introduce el host, el puerto SSH y — muy
+   importante — el **mismo usuario y puerto SOCKS que muestra el panel**. El
+   nodo genera su clave SSH y muestra su clave pública.
+3. **En el VPS:** vuelve a REGISTRAR NODO MOVIL con el mismo nombre y **pega esa
+   clave pública**. Asigna usuarios al nodo y enciende la salida residencial.
 4. **En el nodo:** `[2]` para conectar.
+
+> El usuario y el puerto SOCKS **deben coincidir** con los que muestra el panel.
+> Si no, el móvil publica el SOCKS en un puerto y el VPS lo busca en otro: el
+> túnel conecta pero no hay internet.
+
+Sin panel (manual). El nodo deja una receta en `<config>/vps-setup.txt` (también
+en `[5]`) que instala `redsocks` y las reglas en el VPS a mano. **No la ejecutes
+si usas el panel:** crearía reglas que chocan con las suyas.
 
 ---
 
