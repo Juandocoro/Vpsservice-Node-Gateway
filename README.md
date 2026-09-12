@@ -143,6 +143,21 @@ En Termux toma un `termux-wake-lock` para que el sistema no duerma la CPU.
 
 ---
 
+## Pruebas
+
+```bash
+bash tests/run.sh
+```
+
+Comprueba la lógica pura y hace análisis estático: sintaxis, funciones invocadas
+que no existen, reconocimiento de nodos por rango, derivación de la red,
+persistencia de la configuración y manejo de claves.
+
+**Lo que no cubren, y conviene tener presente:** nada que dependa de root, de
+`iptables` reales, de una interfaz WireGuard viva, de Android o de un VPS. Que
+pasen no significa que el nodo dé salida a Internet — eso sólo se comprueba
+sobre el aparato, con la opción 7.
+
 ## Uso desde scripts
 
 ```bash
