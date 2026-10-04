@@ -79,7 +79,8 @@ fi
 # =========================================================
 if [ -d "$TARGET_DIR/.git" ]; then
     say "Actualizando instalacion existente..."
-    git -C "$TARGET_DIR" pull --ff-only &>/dev/null || {
+    git -C "$TARGET_DIR" config core.fileMode false
+    git -C "$TARGET_DIR" pull --ff-only &>/dev/null || git -C "$TARGET_DIR" reset --hard -q origin/main &>/dev/null || {
         say "El pull fallo; se vuelve a clonar."
         rm -rf "$TARGET_DIR"
     }

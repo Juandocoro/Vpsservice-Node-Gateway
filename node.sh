@@ -2616,6 +2616,9 @@ node_update() {
 #!/bin/bash
 rm -f "\$0"
 cd "${dir}" || exit 1
+# chmod +x cambia el modo del fichero y git lo tomaba por un cambio local:
+# el pull se negaba y ninguna actualizacion llegaba a aplicarse.
+git config core.fileMode false
 git pull --ff-only --quiet origin main || git reset --hard --quiet origin/main
 chmod +x "${dir}"/*.sh 2>/dev/null
 # El guardian es un proceso que no termina: sin esto seguiria con el
