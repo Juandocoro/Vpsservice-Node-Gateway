@@ -1505,8 +1505,8 @@ socks_vps_recipe() {
 #
 #   !!! SI TU VPS USA EL PANEL VPSService, NO EJECUTES ESTO !!!
 #
-# El panel ya lo hace: Gateway residencial > Nodos > Registrar
-# nodo movil (o Configuracion > [B] Movil sin root). Esta receta
+# El panel ya lo hace: IP residencial > Nodos > Registrar
+# nodo movil (o IP residencial > Movil sin root). Esta receta
 # desvia la marca 0x77, que en el panel es la del NODO 1, y
 # mandaria a los usuarios de ese nodo por este movil; ademas
 # activa un redsocks global que el panel apaga y guarda reglas
