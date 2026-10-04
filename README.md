@@ -69,16 +69,16 @@ que fuerces resolución por TCP.
 
 1. **En el VPS:** panel `menu` ▸ IP RESIDENCIAL ▸ AVANZADO ▸ INSTALAR (una vez),
    y en AVANZADO ▸ CLAVE PÚBLICA DEL VPS copia su clave.
-2. **En el nodo:** `nodo` ▸ `[1]` configurar. Pega la IP del VPS, la IP de este
+2. **En el nodo:** `nodo` ▸ CONFIGURAR DE CERO. Pega la IP del VPS, la IP de este
    nodo (10.77.77.2 si es el primero; el puerto se propone solo a partir de ella)
    y la clave pública del VPS.
 3. El nodo te muestra **su** clave pública.
 4. **En el VPS:** IP RESIDENCIAL ▸ NODOS ▸ REGISTRAR NODO PC y pega esa clave. El
    panel te dice la IP y el puerto que le asignó; si no coinciden con los del
    paso 2, reconfigura el nodo con esos.
-5. **En el nodo:** `[2]` para conectar.
+5. **En el nodo:** `[1]` CONECTAR (arranca también el guardián).
 6. **En el VPS:** ASIGNAR USUARIOS y enciende la SALIDA RESIDENCIAL.
-7. Comprueba: `[8]` en el nodo y IP RESIDENCIAL ▸ DIAGNÓSTICO en el VPS deben
+7. Comprueba: `[3]` DIAGNÓSTICO en el nodo y IP RESIDENCIAL ▸ DIAGNÓSTICO en el VPS deben
    mostrar la misma IP.
 
 ### Modo B — SOCKS inverso
@@ -89,12 +89,12 @@ genera la llave.
 1. **En el VPS:** panel `menu` ▸ IP RESIDENCIAL ▸ NODOS ▸
    REGISTRAR NODO MÓVIL. Reserva el nodo y te muestra el **usuario** (`snodeN`)
    y el **puerto SOCKS** (`1108N`) exactos.
-2. **En el nodo:** `nodo` ▸ `[1]`. Introduce el host, el puerto SSH y — muy
+2. **En el nodo:** `nodo` ▸ CONFIGURAR DE CERO. Introduce el host, el puerto SSH y — muy
    importante — el **mismo usuario y puerto SOCKS que muestra el panel**. El
    nodo genera su clave SSH y muestra su clave pública.
 3. **En el VPS:** vuelve a REGISTRAR NODO MÓVIL con el mismo nombre y **pega esa
    clave pública**. Asigna usuarios al nodo y enciende la salida residencial.
-4. **En el nodo:** `[2]` para conectar.
+4. **En el nodo:** `[1]` CONECTAR.
 
 > El usuario y el puerto SOCKS **deben coincidir** con los que muestra el panel.
 > Si no, el móvil publica el SOCKS en un puerto y el VPS lo busca en otro: el
@@ -106,14 +106,37 @@ además **IP residencial → Móvil sin root (beta)**, que no necesita este proy
 genera la llave en el VPS y da un solo bloque para pegar en Termux.
 
 Sin panel (manual). El nodo deja una receta en `<config>/vps-setup.txt` (también
-en `[5]`) que instala `redsocks` y las reglas en el VPS a mano. **No la ejecutes
+en CLAVE DE ESTE NODO) que instala `redsocks` y las reglas en el VPS a mano. **No la ejecutes
 si usas el panel:** crearía reglas que chocan con las suyas.
+
+---
+
+## El menú
+
+```
+[1] CONECTAR / DESCONECTAR   con guardián        [ ON ]
+[2] ARRANQUE AL ENCENDER     persistencia        [ ON ]
+[3] DIAGNÓSTICO              cadena completa
+── CONFIGURACIÓN ──
+[4] DATOS DEL VPS            host · puerto · clave
+[5] CLAVE DE ESTE NODO       para el panel
+[6] CONFIGURAR DE CERO       asistente
+── MÁS ──
+[7] REGISTRO   [8] ACTUALIZAR   [9] DATOS DEL EQUIPO   [10] ELIMINAR NODO
+```
+
+El **diagnóstico** recorre seis pasos (herramientas, enlace, handshake, alcance
+del VPS, reenvío/NAT o Internet del móvil, e IP de salida) y, si algo falla,
+ofrece la guía de qué comprobar en el VPS. **Datos del VPS** cambia host,
+puerto o clave sin tocar las claves de este nodo, y propone el puerto a partir
+de la IP del nodo (van emparejados). **Actualizar** relanza el guardián para
+que use el código nuevo.
 
 ---
 
 ## Arranque automático
 
-`[3]` en el menú. El mecanismo se elige según el aparato:
+`[2]` en el menú. El mecanismo se elige según el aparato:
 
 | Aparato | Mecanismo |
 |---|---|
@@ -122,7 +145,7 @@ si usas el panel:** crearía reglas que chocan con las suyas.
 | Termux con Magisk | `/data/adb/service.d/` — arranca antes de desbloquear |
 | Sin systemd | `@reboot` en cron |
 
-Actívalo desde la opción **3**, que además comprueba los requisitos del
+Actívalo desde la opción **2**, que además comprueba los requisitos del
 dispositivo y trae un **PROBAR AHORA**: detiene todo y lo vuelve a montar como
 si acabaras de reiniciar, para no descubrir en el próximo arranque que faltaba
 algo.
@@ -141,9 +164,12 @@ Arrancará un solo guardián: el segundo detecta al primero y se retira.
 
 Levantar el túnel una vez al arrancar no basta en un móvil: cambia de wifi a
 datos, pierde cobertura, y Android mata procesos en segundo plano. El guardián
-(`[4]`) revisa cada 30 s y:
+va con la conexión (`[1]`: conectar lo arranca, desconectar lo para) y revisa
+cada 15 s (10 s en modo SOCKS):
 
 - reconecta si el enlace cayó;
+- **repone el reenvío y el NAT si desaparecen** (un `firewall-cmd --reload`,
+  Docker al reiniciarse...): sin esto el túnel seguía vivo pero sin dar Internet;
 - reinicia el túnel si el handshake lleva más de 240 s sin renovarse;
 - **rehace el NAT cuando cambia la interfaz de salida** — sin esto, pasar de
   wifi a datos deja el `MASQUERADE` apuntando a una interfaz muerta.

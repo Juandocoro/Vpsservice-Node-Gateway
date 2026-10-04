@@ -99,6 +99,10 @@ fi
 chmod +x "$TARGET_DIR"/*.sh 2>/dev/null
 ok "Codigo instalado."
 
+# Reinstalar sobre un nodo en marcha: el guardian seguiria ejecutando
+# el codigo viejo hasta el proximo reinicio. Si corria, se relanza.
+bash "$TARGET_DIR/node.sh" --restart-guardian &>/dev/null
+
 # =========================================================
 # Comando global 'nodo'
 # La configuracion del nodo NO se guarda aqui: vive en

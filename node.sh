@@ -1106,7 +1106,7 @@ wg_apply_peer() {
             ui_err "No hay clave privada para este nodo."
             echo -e "${UI_PAD}${DM}   Ni ${NODE_PRIV}${CR}"
             echo -e "${UI_PAD}${DM}   ni una linea PrivateKey dentro de ${NODE_WGCONF:-<sin conf>}.${CR}"
-            echo -e "${UI_PAD}${DM}   Reconfigura con la opcion 1 para generar un par nuevo${CR}"
+            echo -e "${UI_PAD}${DM}   CONFIGURAR DE CERO (opcion 6) genera un par nuevo${CR}"
             echo -e "${UI_PAD}${DM}   (tendras que registrarlo de nuevo en el VPS).${CR}"
         }
         return 1
@@ -1118,7 +1118,7 @@ wg_apply_peer() {
             ui_err "Faltan datos del VPS."
             echo -e "${UI_PAD}${DM}   Clave publica: ${CFG_VPS_PUBKEY:-<vacia>}${CR}"
             echo -e "${UI_PAD}${DM}   Host: ${CFG_VPS_HOST:-<vacio>}${CR}"
-            echo -e "${UI_PAD}${DM}   Complétalos con la opcion 6 del menu.${CR}"
+            echo -e "${UI_PAD}${DM}   Complétalos en DATOS DEL VPS (opcion 4).${CR}"
         }
         return 1
     fi
@@ -1139,7 +1139,7 @@ wg_apply_peer() {
 # Android se rompe; montarla a mano es identico y portable.
 wg_tunnel_up() {
     local quiet="${1:-}"
-    [ -f "$NODE_WGCONF" ] || { [ -z "$quiet" ] && ui_err "Falta ${NODE_WGCONF}. Reconfigura (opcion 1)."; return 1; }
+    [ -f "$NODE_WGCONF" ] || { [ -z "$quiet" ] && ui_err "Falta ${NODE_WGCONF}. Usa CONFIGURAR DE CERO (opcion 6)."; return 1; }
 
     if wg_is_up; then
         if wg_peer_configured; then
@@ -1210,7 +1210,7 @@ wg_tunnel_up() {
             ui_warn "Sin handshake tras ${w}s."
             echo -e "${UI_PAD}${DM}   Hasta que lo haya, el VPS NO puede hacerte ping:${CR}"
             echo -e "${UI_PAD}${DM}   no conoce tu direccion hasta que tu le hablas.${CR}"
-            echo -e "${UI_PAD}${DM}   Usa la opcion 7 para ver donde se corta.${CR}"
+            echo -e "${UI_PAD}${DM}   El DIAGNOSTICO (opcion 3) te dice donde se corta.${CR}"
         }
         return 0
     fi
@@ -1451,7 +1451,7 @@ socks_tunnel_up() {
         [ -z "$quiet" ] && ui_warn "El tunel SOCKS ya estaba activo."
         return 0
     fi
-    [ -f "$NODE_SSH_KEY" ] || { [ -z "$quiet" ] && ui_err "Falta la clave SSH. Reconfigura (opcion 1)."; return 1; }
+    [ -f "$NODE_SSH_KEY" ] || { [ -z "$quiet" ] && ui_err "Falta la clave SSH. Usa CONFIGURAR DE CERO (opcion 6)."; return 1; }
 
     # En Android el sistema duerme la CPU y mata el proceso a los
     # pocos minutos de apagar la pantalla; el wake lock lo evita.
@@ -1634,7 +1634,9 @@ node_link_healthy() {
 # levantar cada vez que se cae, y que renueve el NAT cuando la
 # interfaz de salida cambia de nombre.
 # =========================================================
-NODE_GUARD_INTERVAL="30"
+# 15 s: comprobar el tunel y el NAT es barato, y cada vuelta perdida son
+# usuarios que el VPS manda a su IP mientras el nodo no se cura.
+NODE_GUARD_INTERVAL="15"
 # En modo SOCKS revisar es gratis (mirar si vive un proceso) y cada
 # segundo sin tunel son clientes sin la IP del movil: 10 s.
 NODE_GUARD_INTERVAL_SOCKS="10"
@@ -1681,6 +1683,13 @@ node_guardian_loop() {
                 nat_off quiet
                 nat_on quiet
                 last_uplink="$up"
+            # Y aunque la salida no cambie: si algo borro el reenvio o el
+            # NAT (un 'firewall-cmd --reload', Docker al reiniciarse, otro
+            # script), el tunel seguia vivo sin dar Internet y nadie lo
+            # reponia. El VPS aparta el nodo; aqui se cura solo.
+            elif [ -n "$up" ] && { ! nat_is_active || [ "$(_root_run "sysctl -n net.ipv4.ip_forward" 2>/dev/null | tr -dc '0-9')" != "1" ]; }; then
+                _node_log "Reenvio o NAT desaparecidos — reponiendo"
+                nat_on quiet
             fi
         fi
         if [ "$CFG_MODE" = "socks" ]; then sleep "$NODE_GUARD_INTERVAL_SOCKS"
@@ -1832,13 +1841,17 @@ autostart_disable() {
 # =========================================================
 # PANTALLAS
 # =========================================================
+# La version no cambia con el panel abierto (actualizar lo relanza):
+# se calcula una vez en vez de lanzar 'git' en cada pantalla.
+NODE_TITLE_VER=""
 node_title() {
-    local ver="${NODE_VERSION}"
-    local rev
-    rev=$(git -C "$(dirname "$NODE_SELF")" rev-parse --short HEAD 2>/dev/null)
-    [ -n "$rev" ] && ver="${NODE_VERSION} · ${rev}"
+    if [ -z "$NODE_TITLE_VER" ]; then
+        local rev
+        rev=$(git -C "$(dirname "$NODE_SELF")" rev-parse --short HEAD 2>/dev/null)
+        NODE_TITLE_VER="${NODE_VERSION}${rev:+ · ${rev}}"
+    fi
     echo ""
-    ui_header "NODO · ${ver}"
+    ui_header "NODO · ${NODE_TITLE_VER}"
 }
 
 # Recomendacion de modo segun lo que el aparato permite de verdad.
@@ -1903,7 +1916,7 @@ node_install() {
             ui_warn "Esta configuracion se adopto de un montaje anterior."
             echo -e "${UI_PAD}${DM}   Sus claves son las que el VPS tiene registradas.${CR}"
             echo -e "${UI_PAD}${DM}   Si solo quieres cambiar el host o la clave del VPS,${CR}"
-            echo -e "${UI_PAD}${DM}   usa la opcion 6 del menu en lugar de reconfigurar.${CR}"
+            echo -e "${UI_PAD}${DM}   usa DATOS DEL VPS (opcion 4) en lugar de reconfigurar.${CR}"
         fi
         ui_blank
         ui_confirm "¿Sobrescribirla?" "n" || { ui_ok "Sin cambios."; sleep 1; return; }
@@ -1962,13 +1975,70 @@ node_install() {
     ui_pause
 }
 
+# Datos del VPS en modo WireGuard. Los usan el asistente y la opcion
+# DATOS DEL VPS, para que las dos pantallas pregunten lo mismo y del
+# mismo modo (antes la segunda no deducia el puerto de la IP).
+_node_ask_vps_wg() {
+    until ui_ask "IP publica o dominio del VPS" "$CFG_VPS_HOST"; \
+          CFG_VPS_HOST="$REPLY_UI"; \
+          [ -n "$CFG_VPS_HOST" ] && _node_check_endpoint_host "$CFG_VPS_HOST"; do
+        [ -z "$CFG_VPS_HOST" ] && { ui_err "Sin host no hay nodo."; ui_pause; return 1; }
+    done
+
+    # Primero la IP y despues el puerto: van emparejados (nodo N =
+    # 10.77.(76+N).2 y puerto 51819+N), asi que el puerto se propone
+    # solo a partir de la IP.
+    ui_blank
+    echo -e "${UI_PAD}${DM}El VPS asigna una IP a cada nodo al registrarlo. Si solo${CR}"
+    echo -e "${UI_PAD}${DM}hay uno, deja el valor por defecto.${CR}"
+    ui_ask "IP de este nodo en el tunel" "${NODE_SELF_WGIP}"
+    case "$REPLY_UI" in
+        10.77.*) NODE_SELF_WGIP="$REPLY_UI" ;;
+        *) ui_warn "Fuera del rango 10.77.x.x; se deja ${NODE_SELF_WGIP}." ;;
+    esac
+    CFG_SELF_IP="$NODE_SELF_WGIP"
+    _node_derive_net
+
+    local sugerido
+    sugerido=$(_node_port_for_ip "$NODE_SELF_WGIP")
+    ui_ask "Puerto WireGuard del VPS" "$sugerido"
+    CFG_VPS_PORT="$REPLY_UI"
+    if [ "$CFG_VPS_PORT" != "$sugerido" ]; then
+        ui_warn "Para la IP ${NODE_SELF_WGIP} el panel usa el puerto ${sugerido}."
+        ui_confirm "¿Usar ${CFG_VPS_PORT} de todos modos?" "n" || CFG_VPS_PORT="$sugerido"
+    fi
+
+    ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"
+    CFG_VPS_PUBKEY="$REPLY_UI"
+    ui_blank
+    ui_info "Red de este nodo: ${NODE_SUBNET} — VPS en ${NODE_VPS_WGIP}, puerto ${CFG_VPS_PORT}"
+    return 0
+}
+
+# Funcion pura: puerto del VPS que corresponde a la IP de un nodo.
+#   10.77.77.2 -> 51820 · 10.77.78.2 -> 51821 · ...
+_node_port_for_ip() {
+    local o3
+    o3=$(echo "$1" | cut -d. -f3)
+    if [[ "$o3" =~ ^[0-9]+$ ]] && [ "$o3" -ge 77 ]; then echo $(( 51820 + o3 - 77 )); else echo "$NODE_DEFAULT_PORT"; fi
+}
+
+# Interfaz con la que el VPS atiende a este nodo (wg-home, wg-home2...).
+_node_vps_iface() {
+    local o3 n
+    o3=$(echo "${1:-$NODE_SELF_WGIP}" | cut -d. -f3)
+    [[ "$o3" =~ ^[0-9]+$ ]] || { echo "wg-home"; return; }
+    n=$(( o3 - 76 ))
+    [ "$n" -le 1 ] && echo "wg-home" || echo "wg-home${n}"
+}
+
 # El endpoint es la direccion PUBLICA del VPS, por la que se llega a
 # el desde Internet. Poner ahi su direccion dentro del tunel
 # (10.77.77.1) es un error facil de cometer y que luego no se ve:
 # el tunel no puede transportarse a si mismo.
 _node_check_endpoint_host() {
     case "$1" in
-        10.77.77.*)
+        10.77.*)
             ui_blank
             ui_err "Esa es una direccion DE DENTRO del tunel."
             echo -e "${UI_PAD}${DM}   ${NODE_VPS_WGIP} es el VPS visto desde dentro del tunel,${CR}"
@@ -1995,42 +2065,7 @@ node_install_wireguard() {
     echo -e "${UI_PAD}${DM}IP RESIDENCIAL ▸ NODOS ▸ DATOS PARA EL NODO${CR}"
     ui_blank
 
-    until ui_ask "IP publica o dominio del VPS" "$CFG_VPS_HOST"; \
-          CFG_VPS_HOST="$REPLY_UI"; \
-          [ -n "$CFG_VPS_HOST" ] && _node_check_endpoint_host "$CFG_VPS_HOST"; do
-        [ -z "$CFG_VPS_HOST" ] && { ui_err "Sin host no hay nodo."; ui_pause; return 1; }
-    done
-
-    # Primero la IP y despues el puerto: van emparejados (nodo N =
-    # 10.77.(76+N).2 y puerto 51819+N), asi que el puerto se propone
-    # solo a partir de la IP. Antes se pedia al reves y era facil
-    # dejar el 51820 con la IP del nodo 2: el tunel no conectaba.
-    ui_blank
-    echo -e "${UI_PAD}${DM}El VPS asigna una IP a cada nodo al registrarlo. Si solo${CR}"
-    echo -e "${UI_PAD}${DM}hay uno, deja el valor por defecto.${CR}"
-    ui_ask "IP de este nodo en el tunel" "${NODE_SELF_WGIP}"
-    case "$REPLY_UI" in
-        10.77.*) NODE_SELF_WGIP="$REPLY_UI" ;;
-        *) ui_warn "Fuera del rango 10.77.x.x; se deja ${NODE_SELF_WGIP}." ;;
-    esac
-    CFG_SELF_IP="$NODE_SELF_WGIP"
-    _node_derive_net
-
-    local oct3 sugerido
-    oct3=$(echo "$NODE_SELF_WGIP" | cut -d. -f3)
-    sugerido="$NODE_DEFAULT_PORT"
-    [[ "$oct3" =~ ^[0-9]+$ ]] && [ "$oct3" -ge 77 ] && sugerido=$(( 51820 + oct3 - 77 ))
-    ui_ask "Puerto WireGuard del VPS" "$sugerido"
-    CFG_VPS_PORT="$REPLY_UI"
-    if [ "$CFG_VPS_PORT" != "$sugerido" ]; then
-        ui_warn "Para la IP ${NODE_SELF_WGIP} el panel usa el puerto ${sugerido}."
-        ui_confirm "¿Usar ${CFG_VPS_PORT} de todos modos?" "n" || CFG_VPS_PORT="$sugerido"
-    fi
-
-    ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"
-    CFG_VPS_PUBKEY="$REPLY_UI"
-    ui_blank
-    ui_info "Red de este nodo: ${NODE_SUBNET} — VPS en ${NODE_VPS_WGIP}, puerto ${CFG_VPS_PORT}"
+    _node_ask_vps_wg || return 1
     if ! echo "$CFG_VPS_PUBKEY" | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
         ui_warn "Esa clave no tiene el formato base64 de 44 caracteres."
         ui_confirm "¿Continuar igualmente?" "n" || { ui_pause; return 1; }
@@ -2200,8 +2235,10 @@ node_screen_vps_check() {
     ui_rule
     ui_blank
 
+    local vif
+    vif=$(_node_vps_iface)
     echo -e "${UI_PAD}${YL}1 · ¿Esta el tunel levantado alli?${CR}"
-    echo -e "${UI_PAD}${WH}   sudo wg show ${NODE_IFACE}${CR}"
+    echo -e "${UI_PAD}${WH}   sudo wg show ${vif}${CR}"
     echo -e "${UI_PAD}${DM}   Si dice \"Unable to access interface\", el VPS no lo ha${CR}"
     echo -e "${UI_PAD}${DM}   arrancado. Instalarlo solo lo deja habilitado, no en${CR}"
     echo -e "${UI_PAD}${DM}   marcha: en el panel, IP RESIDENCIAL > AVANZADO > TÚNEL.${CR}"
@@ -2227,10 +2264,10 @@ node_screen_vps_check() {
     echo -e "${UI_PAD}${DM}   Debe dar exactamente:${CR}"
     echo -e "${UI_PAD}${CY}   ${vpspub:-<sin definir>}${CR}"
     ui_blank
-    echo -e "${UI_PAD}${WH}   sudo wg show ${NODE_IFACE} peers${CR}"
+    echo -e "${UI_PAD}${WH}   sudo wg show ${vif} peers${CR}"
     echo -e "${UI_PAD}${DM}   Debe dar exactamente:${CR}"
     echo -e "${UI_PAD}${CY}   ${mypub:-<sin definir>}${CR}"
-    echo -e "${UI_PAD}${DM}   Si no esta, registrala con la opcion [6] del panel.${CR}"
+    echo -e "${UI_PAD}${DM}   Si no esta: IP RESIDENCIAL > NODOS > REGISTRAR NODO PC.${CR}"
     ui_blank
     ui_rule
     ui_blank
@@ -2238,11 +2275,8 @@ node_screen_vps_check() {
     echo -e "${UI_PAD}${DM}   Por eso una clave equivocada se ve igual que un${CR}"
     echo -e "${UI_PAD}${DM}   puerto cerrado: en ambos casos, 0 B recibidos.${CR}"
     ui_blank
-    ui_warn "El VPS admite UN solo nodo a la vez."
-    echo -e "${UI_PAD}${DM}   Su [6] no añade peers: reescribe el unico que hay.${CR}"
-    echo -e "${UI_PAD}${DM}   Si antes funcionaba con otro equipo, registrar este${CR}"
-    echo -e "${UI_PAD}${DM}   desconecta aquel. Para recuperar la identidad que el${CR}"
-    echo -e "${UI_PAD}${DM}   VPS ya conoce, importa su clave: opcion [1] > 2.${CR}"
+    ui_info "El VPS admite varios nodos a la vez, cada uno con su puerto."
+    echo -e "${UI_PAD}${DM}   Este nodo: IP ${NODE_SELF_WGIP}, puerto ${CFG_VPS_PORT}, interfaz ${vif} alli.${CR}"
     ui_solid
     ui_pause
 }
@@ -2272,7 +2306,7 @@ node_screen_pubkey() {
                 cat "${NODE_HOME}/vps-setup.txt" 2>/dev/null | sed 's/^/  /'
             fi
         else
-            ui_err "No hay clave SSH. Reconfigura con la opcion 1."
+            ui_err "No hay clave SSH. Usa CONFIGURAR DE CERO (opcion 6)."
         fi
     else
         wg_ensure_public_key >/dev/null 2>&1
@@ -2285,7 +2319,7 @@ node_screen_pubkey() {
             ui_blank
             ui_warn "La clave privada nunca sale de este dispositivo."
         else
-            ui_err "No hay claves. Reconfigura con la opcion 1."
+            ui_err "No hay claves. Usa CONFIGURAR DE CERO (opcion 6)."
         fi
     fi
     ui_solid
@@ -2300,7 +2334,7 @@ node_screen_pubkey() {
 # =========================================================
 node_diagnose() {
     clear; node_title
-    ui_section "DIAGNOSTICO" "cinco comprobaciones en cadena"
+    ui_section "DIAGNOSTICO" "seis comprobaciones en cadena"
     ui_blank
 
     local ok=0 fail=0
@@ -2309,27 +2343,27 @@ node_diagnose() {
 
     # 1 — Herramientas
     if [ "$CFG_MODE" = "wireguard" ]; then
-        command -v wg &>/dev/null && _chk_ok "1/5 wireguard-tools presente." \
-                                  || _chk_fail "1/5 falta el comando 'wg'."
+        command -v wg &>/dev/null && _chk_ok "1/6 wireguard-tools presente." \
+                                  || _chk_fail "1/6 falta el comando 'wg'."
     else
-        command -v ssh &>/dev/null && _chk_ok "1/5 cliente SSH presente." \
-                                   || _chk_fail "1/5 falta el comando 'ssh'."
+        command -v ssh &>/dev/null && _chk_ok "1/6 cliente SSH presente." \
+                                   || _chk_fail "1/6 falta el comando 'ssh'."
     fi
 
     # 2 — Enlace levantado
     if [ "$CFG_MODE" = "wireguard" ]; then
         if wg_is_up && wg_peer_configured; then
-            _chk_ok "2/5 interfaz ${NODE_IFACE} activa y con peer."
+            _chk_ok "2/6 interfaz ${NODE_IFACE} activa y con peer."
         elif wg_is_up; then
-            _chk_fail "2/5 la interfaz existe pero NO tiene peer configurado."
-            echo -e "${UI_PAD}${DM}     Sube el tunel de nuevo (opcion 2): se repara solo.${CR}"
+            _chk_fail "2/6 la interfaz existe pero NO tiene peer configurado."
+            echo -e "${UI_PAD}${DM}     Desconecta y vuelve a conectar (opcion 1): se repara solo.${CR}"
         else
-            _chk_fail "2/5 la interfaz ${NODE_IFACE} no existe."
+            _chk_fail "2/6 la interfaz ${NODE_IFACE} no existe."
         fi
     elif node_link_is_up; then
-        _chk_ok "2/5 enlace activo."
+        _chk_ok "2/6 enlace activo."
     else
-        _chk_fail "2/5 el enlace esta caido."
+        _chk_fail "2/6 el enlace esta caido."
     fi
 
     # 3 — Conversacion con el VPS
@@ -2337,11 +2371,11 @@ node_diagnose() {
         local age
         age=$(wg_handshake_age)
         if [ "$age" -ge 0 ] 2>/dev/null && [ "$age" -lt 180 ]; then
-            _chk_ok "3/5 handshake hace ${age}s."
+            _chk_ok "3/6 handshake hace ${age}s."
         elif [ "$age" -ge 0 ] 2>/dev/null; then
-            _chk_fail "3/5 ultimo handshake hace ${age}s (obsoleto)."
+            _chk_fail "3/6 ultimo handshake hace ${age}s (obsoleto)."
         else
-            _chk_fail "3/5 nunca hubo handshake."
+            _chk_fail "3/6 nunca hubo handshake."
             # Aqui esta la explicacion del sintoma clasico. El VPS no
             # lleva Endpoint en su bloque [Peer] — no puede llevarlo,
             # porque este equipo esta tras CGNAT y no tiene IP fija.
@@ -2355,34 +2389,34 @@ node_diagnose() {
                 echo -e "${UI_PAD}${DM}     Eso apunta a UDP ${CFG_VPS_PORT} bloqueado en el VPS${CR}"
                 echo -e "${UI_PAD}${DM}     (UFW o cortafuegos de DigitalOcean) o a que la${CR}"
                 echo -e "${UI_PAD}${DM}     clave publica registrada alli no es la de este nodo.${CR}"
-                echo -e "${UI_PAD}${WH}     Usa la opcion [12]: te da los comandos exactos.${CR}"
+                echo -e "${UI_PAD}${WH}     Mas abajo: QUE COMPROBAR EN EL VPS, con los comandos exactos.${CR}"
             elif [ "${tx:-0}" = "0" ]; then
                 echo -e "${UI_PAD}${DM}     No sale ni un byte: revisa el peer y el endpoint.${CR}"
             fi
         fi
     else
         if socks_is_up; then
-            _chk_ok "3/5 sesion SSH sostenida."
+            _chk_ok "3/6 sesion SSH sostenida."
         else
-            _chk_fail "3/5 la sesion SSH no esta viva."
+            _chk_fail "3/6 la sesion SSH no esta viva."
         fi
     fi
 
     # 4 — Alcance del otro extremo
     if [ "$CFG_MODE" = "wireguard" ]; then
         if ! wg_endpoint_known; then
-            _chk_fail "4/5 la interfaz no tiene endpoint del VPS resuelto."
+            _chk_fail "4/6 la interfaz no tiene endpoint del VPS resuelto."
             echo -e "${UI_PAD}${DM}     Revisa que ${CFG_VPS_HOST}:${CFG_VPS_PORT} sea correcto.${CR}"
         elif ping -c 2 -W 3 "$NODE_VPS_WGIP" &>/dev/null; then
-            _chk_ok "4/5 el VPS responde en ${NODE_VPS_WGIP}."
+            _chk_ok "4/6 el VPS responde en ${NODE_VPS_WGIP}."
         else
-            _chk_fail "4/5 sin respuesta de ${NODE_VPS_WGIP}."
+            _chk_fail "4/6 sin respuesta de ${NODE_VPS_WGIP}."
         fi
     else
         if timeout 8 bash -c "</dev/tcp/${CFG_VPS_HOST}/${CFG_VPS_PORT}" &>/dev/null; then
-            _chk_ok "4/5 puerto SSH ${CFG_VPS_PORT} alcanzable."
+            _chk_ok "4/6 puerto SSH ${CFG_VPS_PORT} alcanzable."
         else
-            _chk_fail "4/5 no se alcanza ${CFG_VPS_HOST}:${CFG_VPS_PORT}."
+            _chk_fail "4/6 no se alcanza ${CFG_VPS_HOST}:${CFG_VPS_PORT}."
         fi
     fi
 
@@ -2392,24 +2426,37 @@ node_diagnose() {
         fwd=$(_root_run "sysctl -n net.ipv4.ip_forward 2>/dev/null" 2>/dev/null | tr -dc '0-9')
         up_i=$(_node_uplink_iface)
         if [ "$fwd" != "1" ]; then
-            _chk_fail "5/5 ip_forward apagado: el VPS no navegara."
+            _chk_fail "5/6 ip_forward apagado: el VPS no navegara."
         elif nat_is_active; then
-            _chk_ok "5/5 reenvio y NAT instalados hacia ${up_i}."
+            _chk_ok "5/6 reenvio y NAT instalados hacia ${up_i}."
         else
-            _chk_fail "5/5 faltan nuestras reglas de reenvio o NAT."
-            echo -e "${UI_PAD}${DM}     Apaga y enciende la conexion (opcion 2) para ponerlas.${CR}"
+            _chk_fail "5/6 faltan nuestras reglas de reenvio o NAT."
+            echo -e "${UI_PAD}${DM}     El guardian las repone solo; o desconecta y conecta (opcion 1).${CR}"
         fi
     else
-        if [ -f "${NODE_HOME}/vps-setup.txt" ]; then
-            _chk_ok "5/5 receta del VPS generada (verifica redsocks alli)."
+        # Lo que de verdad importa en modo SOCKS: que el telefono navegue.
+        # (Antes se comprobaba que existiera un fichero de texto.)
+        if curl -s -o /dev/null -m 8 http://1.1.1.1/cdn-cgi/trace 2>/dev/null; then
+            _chk_ok "5/6 este telefono tiene Internet."
         else
-            _chk_fail "5/5 falta la receta del VPS."
+            _chk_fail "5/6 este telefono NO tiene Internet: el VPS no podra salir por el."
         fi
+    fi
+
+    # 6 — IP de salida: la que veran los destinos
+    local ipx=""
+    ipx=$(curl -4 -s --max-time 8 https://api.ipify.org 2>/dev/null)
+    if [ -n "$ipx" ]; then
+        _chk_ok "6/6 IP de salida de este nodo: ${ipx} (por $(_node_uplink_iface))."
+        echo -e "${UI_PAD}${DM}     Es la que debe mostrar el panel en IP RESIDENCIAL > DIAGNÓSTICO.${CR}"
+    else
+        _chk_fail "6/6 este equipo no consigue salir a Internet."
     fi
 
     ui_blank
     ui_rule
     echo -e "${UI_PAD}$(ui_cell "Correctas" "$ok" 20 "$GR")${DM}▸${CR} $(ui_cell "Fallidas" "$fail" 20 "$RD")"
+    NODE_DIAG_FAIL="$fail"
 
     if [ "$CFG_MODE" = "wireguard" ] && wg_is_up; then
         ui_blank
@@ -2435,47 +2482,20 @@ node_diagnose() {
                 echo -e "${UI_PAD}${DM}   El tunel esta vivo y las reglas puestas, pero el VPS${CR}"
                 echo -e "${UI_PAD}${DM}   no esta mandando trafico. Falta activarlo alli:${CR}"
                 echo -e "${UI_PAD}${DM}   · IP RESIDENCIAL > ASIGNAR USUARIOS -> este nodo${CR}"
-                echo -e "${UI_PAD}${DM}   · SALIDA RESIDENCIAL -> encender${CR}"
-                echo -e "${UI_PAD}${DM}   · CONFIGURAR USUARIOS -> elegir quien sale por aqui${CR}"
+                echo -e "${UI_PAD}${DM}   · IP RESIDENCIAL > SALIDA RESIDENCIAL -> encender${CR}"
             fi
         else
             ui_err "No hay ninguna regla nuestra instalada."
-            echo -e "${UI_PAD}${DM}   Apaga y enciende la conexion (opcion 2).${CR}"
+            echo -e "${UI_PAD}${DM}   Desconecta y vuelve a conectar (opcion 1).${CR}"
         fi
     fi
 
     ui_solid
-    ui_pause
-}
-
-node_check_ip() {
-    clear; node_title
-    ui_section "IP DE SALIDA" "la que veran los destinos"
-    ui_blank
-
-    ui_info "Consultando IP publica de este dispositivo..."
-    local ip=""
-    if command -v curl &>/dev/null; then
-        ip=$(curl -4 -s --max-time 8 https://api.ipify.org 2>/dev/null || curl -4 -s --max-time 8 https://ifconfig.me 2>/dev/null)
-    elif command -v wget &>/dev/null; then
-        ip=$(wget -qO- --timeout=8 https://api.ipify.org 2>/dev/null)
-    else
-        ui_warn "No hay curl ni wget para consultar la IP."
+    # Antes "comprobar el VPS" era otra opcion del menu: ahora se ofrece
+    # justo cuando hace falta, al final de un diagnostico con fallos.
+    if [ "${NODE_DIAG_FAIL:-0}" -gt 0 ] && ui_confirm "¿Ver que comprobar en el VPS?" "s"; then
+        node_screen_vps_check; return
     fi
-    ui_blank
-
-    if [ -n "$ip" ]; then
-        echo -e "${UI_PAD}$(ui_cell "IP residencial" "$ip" 30 "$GR")"
-    else
-        echo -e "${UI_PAD}$(ui_cell "IP residencial" "sin respuesta" 30 "$RD")"
-    fi
-    echo -e "${UI_PAD}$(ui_cell "Salida por" "$(_node_uplink_iface || echo 'sin red')" 30 "$CY")"
-    ui_blank
-    ui_rule
-    echo -e "${UI_PAD}${DM}Esta debe ser la misma que muestra el panel del VPS${CR}"
-    echo -e "${UI_PAD}${DM}en IP RESIDENCIAL ▸ DIAGNÓSTICO (salida real)${CR}"
-    echo -e "${UI_PAD}${DM}cuando la salida residencial esta activada.${CR}"
-    ui_solid
     ui_pause
 }
 
@@ -2596,8 +2616,11 @@ node_update() {
 #!/bin/bash
 rm -f "\$0"
 cd "${dir}" || exit 1
-git pull --ff-only --quiet origin main
+git pull --ff-only --quiet origin main || git reset --hard --quiet origin/main
 chmod +x "${dir}"/*.sh 2>/dev/null
+# El guardian es un proceso que no termina: sin esto seguiria con el
+# codigo viejo hasta el siguiente reinicio del equipo.
+bash "${NODE_SELF}" --restart-guardian
 echo ""
 echo "  Actualizado a \$(git -C "${dir}" rev-parse --short HEAD 2>/dev/null)"
 echo "  Reiniciando el panel..."
@@ -2777,126 +2800,147 @@ node_screen_autostart() {
 }
 
 # =========================================================
+# ESTADO EN UNA SOLA LLAMADA
+# ---------------------------------------------------------
+# La cabecera pedia el estado con ~8 comandos de root sueltos; en
+# Android con Magisk cada uno es un 'su' (lento, y con aviso en
+# pantalla). Ahora es una sola llamada que devuelve clave=valor.
+# =========================================================
+_node_status_wg() {
+    local up="$1"
+    _root_run "
+        ip link show ${NODE_IFACE} >/dev/null 2>&1 && echo IF=1 || echo IF=0
+        echo PEERS=\$(wg show ${NODE_IFACE} peers 2>/dev/null | wc -l)
+        echo HS=\$(wg show ${NODE_IFACE} latest-handshakes 2>/dev/null | awk '{print \$2}' | head -1)
+        if [ -n '${up}' ] && iptables -t nat -C POSTROUTING -o '${up}' -m comment --comment ${NODE_TAG} -j MASQUERADE 2>/dev/null \
+           && iptables -C FORWARD -i ${NODE_IFACE} -o '${up}' -m comment --comment ${NODE_TAG} -j ACCEPT 2>/dev/null; then
+            echo NAT=1; else echo NAT=0; fi
+    " 2>/dev/null
+}
+
+# Pantalla de los datos del VPS (sin tocar las claves)
+node_screen_vps_data() {
+    clear; node_title
+    ui_section "DATOS DEL VPS" "cambiar host, puerto o clave sin perder las de este nodo"
+    ui_blank
+    if [ "$CFG_MODE" = "wireguard" ]; then
+        _node_ask_vps_wg || return
+        node_cfg_save; wg_write_conf
+        ui_blank; ui_ok "Datos actualizados."
+        if node_link_is_up && ui_confirm "¿Reconectar para aplicarlos?" "s"; then
+            node_link_down quiet; node_link_up
+        fi
+    else
+        ui_ask "IP o dominio del VPS" "$CFG_VPS_HOST"; CFG_VPS_HOST="$REPLY_UI"
+        ui_ask "Puerto SSH" "$CFG_VPS_PORT";           CFG_VPS_PORT="$REPLY_UI"
+        ui_ask "Usuario SSH (snodeN del panel)" "$CFG_SSH_USER"; CFG_SSH_USER="$REPLY_UI"
+        ui_ask "Puerto SOCKS (1108N del panel)" "$CFG_SOCKS_PORT"; CFG_SOCKS_PORT="$REPLY_UI"
+        node_cfg_save
+        socks_vps_recipe > "${NODE_HOME}/vps-setup.txt"
+        ui_blank; ui_ok "Datos actualizados."
+        if node_link_is_up && ui_confirm "¿Reconectar para aplicarlos?" "s"; then
+            node_link_down quiet; node_link_up
+        fi
+    fi
+    ui_pause
+}
+
+# =========================================================
 # MENU PRINCIPAL
+# ---------------------------------------------------------
+# Antes: 14 opciones numeradas 1-10, 12, 13 y 11; cinco de
+# diagnostico; y un interruptor del guardian aparte, con el que
+# era facil dejar el nodo sin reconexion automatica. Ahora el
+# guardian va con la conexion, hay un solo diagnostico y lo que
+# se toca una vez queda abajo.
 # =========================================================
 node_menu() {
     while true; do
         clear; node_title
-        ui_section "NODO DE SALIDA RESIDENCIAL" "contraparte del gateway del VPS"
+        ui_section "NODO DE SALIDA RESIDENCIAL" "presta la IP de este equipo al VPS"
         ui_blank
 
-        local TAG_LINK TAG_AUTO TAG_GUARD modo_txt
-        node_link_is_up      && TAG_LINK="$(ui_tag_str on)"  || TAG_LINK="$(ui_tag_str off)"
-        autostart_is_on      && TAG_AUTO="$(ui_tag_str on)"  || TAG_AUTO="$(ui_tag_str off)"
-        node_guardian_is_running && TAG_GUARD="$(ui_tag_str on)" || TAG_GUARD="$(ui_tag_str off)"
+        local TAG_LINK TAG_AUTO modo_txt up_now st="" hs age agetxt nat guard
+        up_now=$(_node_uplink_iface)
+        if [ "$CFG_MODE" = "wireguard" ]; then
+            st=$(_node_status_wg "$up_now")
+            hs=$(sed -n 's/^HS=//p' <<<"$st")
+            if grep -q '^IF=1' <<<"$st" && ! grep -q '^PEERS=0' <<<"$st"; then
+                TAG_LINK="$(ui_tag_str on)"; else TAG_LINK="$(ui_tag_str off)"; fi
+        else
+            socks_is_up && TAG_LINK="$(ui_tag_str on)" || TAG_LINK="$(ui_tag_str off)"
+        fi
+        autostart_is_on && TAG_AUTO="$(ui_tag_str on)" || TAG_AUTO="$(ui_tag_str off)"
+        node_guardian_is_running && guard="vigilando" || guard="parado"
 
         [ "$CFG_MODE" = "wireguard" ] && modo_txt="WireGuard" || modo_txt="SOCKS inverso"
-
         [ "$CFG_ADOPTED" = "si" ] && modo_txt="${modo_txt} (adoptado)"
         ui_row2 "Dispositivo" "${DEV_LABEL}" "Modo" "${modo_txt}"
-        local up_now
-        up_now=$(_node_uplink_iface)
         ui_row2 "VPS" "${CFG_VPS_HOST:-sin definir}" "Salida" "${up_now:-sin red}"
-
         if [ "$CFG_MODE" = "wireguard" ]; then
-            local age agetxt
-            age=$(wg_handshake_age)
-            if [ "$age" -ge 0 ] 2>/dev/null; then agetxt="hace ${age}s"; else agetxt="nunca"; fi
-            ui_row2 "Handshake" "${agetxt}" "NAT" "$(nat_is_active && echo activo || echo inactivo)"
+            if [[ "$hs" =~ ^[0-9]+$ ]] && [ "$hs" -gt 0 ]; then
+                age=$(( $(date +%s) - hs )); agetxt="hace ${age}s"
+            else
+                agetxt="nunca"
+            fi
+            grep -q '^NAT=1' <<<"$st" && nat="activo" || nat="inactivo"
+            ui_row2 "Handshake" "${agetxt}" "NAT" "${nat}"
         fi
+        ui_row2 "Guardian" "${guard}" "IP túnel" "${NODE_SELF_WGIP}"
         ui_rule
 
-        # Si la config no da para levantar el tunel, decirlo aqui y
-        # no dentro de tres opciones: es lo primero que el usuario
-        # necesita saber al abrir el panel.
         if ! node_config_is_sane; then
             ui_blank
             ui_err "Esta configuracion NO puede levantar el tunel."
             if [ ! -s "$NODE_PRIV" ] && [ -z "$(_wg_conf_get "$NODE_WGCONF" "PrivateKey")" ]; then
-                echo -e "${UI_PAD}${DM}   Falta la clave privada de este nodo.${CR}"
+                echo -e "${UI_PAD}${DM}   Falta la clave privada de este nodo: CONFIGURAR DE CERO${CR}"
+                echo -e "${UI_PAD}${DM}   (genera claves nuevas que hay que registrar en el panel).${CR}"
             else
-                echo -e "${UI_PAD}${DM}   Faltan la clave publica o el host del VPS.${CR}"
+                echo -e "${UI_PAD}${DM}   Faltan la clave publica o el host del VPS: DATOS DEL VPS.${CR}"
             fi
-            echo -e "${UI_PAD}${WH}   Usa la opcion [1] para reconfigurar desde cero.${CR}"
-            echo -e "${UI_PAD}${DM}   Generara claves nuevas: habra que registrarlas${CR}"
-            echo -e "${UI_PAD}${DM}   en el panel del VPS con su opcion [6].${CR}"
         fi
         ui_blank
 
-        echo -e "${UI_PAD}${YL}── ENLACE ──${CR}"
-        ui_opt "1" "CONFIGURAR NODO"   "asistente"
-        ui_opt "2" "CONEXION AL VPS"   "activar/apagar" "$TAG_LINK"
-        ui_opt "3" "ARRANQUE AL ENCENDER" "persistencia" "$TAG_AUTO"
-        ui_opt "4" "GUARDIAN"          "reconecta solo" "$TAG_GUARD"
+        ui_opt "1" "CONECTAR / DESCONECTAR" "con guardián"   "$TAG_LINK"
+        ui_opt "2" "ARRANQUE AL ENCENDER"   "persistencia"   "$TAG_AUTO"
+        ui_opt "3" "DIAGNÓSTICO"            "cadena completa"
         ui_blank
-        echo -e "${UI_PAD}${YL}── VINCULACION ──${CR}"
-        ui_opt "5" "CLAVE DE ESTE NODO" "para el VPS"
-        ui_opt "6" "CAMBIAR DATOS DEL VPS" "host y clave"
+        echo -e "${UI_PAD}${YL}── CONFIGURACIÓN ──${CR}"
+        ui_opt "4" "DATOS DEL VPS"          "host · puerto · clave"
+        ui_opt "5" "CLAVE DE ESTE NODO"     "para el panel"
+        ui_opt "6" "CONFIGURAR DE CERO"     "asistente"
         ui_blank
-        echo -e "${UI_PAD}${YL}── DIAGNOSTICO ──${CR}"
-        ui_opt "7" "DIAGNOSTICO"       "5 comprobaciones"
-        ui_opt "8" "VER IP DE SALIDA"  "la de tu casa"
-        ui_opt "9" "REGISTRO"          "ultimos eventos"
-        ui_opt "10" "DATOS DEL EQUIPO" "que soporta"
-        ui_opt "12" "COMPROBAR EL VPS"  "si no hay handshake"
-        ui_opt "13" "ACTUALIZAR"        "traer de GitHub"
-        ui_blank
-        ui_opt_danger "11" "ELIMINAR NODO" "borra todo"
+        echo -e "${UI_PAD}${YL}── MÁS ──${CR}"
+        ui_opt "7" "REGISTRO"               "últimos eventos"
+        ui_opt "8" "ACTUALIZAR"             "desde GitHub"
+        ui_opt "9" "DATOS DEL EQUIPO"       "qué soporta"
+        ui_opt_danger "10" "ELIMINAR NODO"  "borra todo"
         ui_opt "0" "SALIR"
         ui_solid
-        ui_prompt "Elige una opcion [0-13]"
+        ui_prompt "Elige una opcion [0-10]"
 
         case "$REPLY_UI" in
-            1)  node_install ;;
-            2)  if node_link_is_up; then
+            1)  # El guardian va con la conexion: conectado = vigilado.
+                if node_link_is_up; then
+                    ui_confirm "¿Desconectar? El VPS mandara a sus usuarios a su respaldo" "n" || continue
                     node_guardian_stop
                     node_link_down
-                    sleep 1
                 else
                     node_link_up
-                    node_guardian_start
-                    sleep 1
-                fi ;;
-            3)  node_screen_autostart ;;
-            4)  if node_guardian_is_running; then node_guardian_stop; ui_ok "Guardian detenido."
-                else node_guardian_start && ui_ok "Guardian en marcha." || ui_err "No arranco."
-                fi; sleep 1 ;;
-            5)  node_screen_pubkey ;;
-            6)  clear; node_title
-                ui_section "DATOS DEL VPS" "reconfigurar sin perder las claves"
-                ui_blank
-                if [ "$CFG_MODE" = "wireguard" ]; then
-                    ui_ask "IP o dominio del VPS" "$CFG_VPS_HOST"
-                    if _node_check_endpoint_host "$REPLY_UI"; then CFG_VPS_HOST="$REPLY_UI"; else ui_pause; continue; fi
-                    ui_ask "Puerto WireGuard" "$CFG_VPS_PORT";     CFG_VPS_PORT="$REPLY_UI"
-                    ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"; CFG_VPS_PUBKEY="$REPLY_UI"
-                    ui_ask "IP de este nodo" "$NODE_SELF_WGIP"
-                    case "$REPLY_UI" in 10.77.*) NODE_SELF_WGIP="$REPLY_UI";; esac
-                    CFG_SELF_IP="$NODE_SELF_WGIP"; _node_derive_net
-                    node_cfg_save; wg_write_conf
-                    ui_blank; ui_ok "Datos actualizados."
-                    if node_link_is_up && ui_confirm "¿Reiniciar el tunel para aplicarlos?" "s"; then
-                        node_link_down quiet; node_link_up
-                    fi
-                else
-                    ui_ask "IP o dominio del VPS" "$CFG_VPS_HOST"; CFG_VPS_HOST="$REPLY_UI"
-                    ui_ask "Puerto SSH" "$CFG_VPS_PORT";           CFG_VPS_PORT="$REPLY_UI"
-                    ui_ask "Usuario SSH" "$CFG_SSH_USER";          CFG_SSH_USER="$REPLY_UI"
-                    ui_ask "Puerto SOCKS en el VPS" "$CFG_SOCKS_PORT"; CFG_SOCKS_PORT="$REPLY_UI"
-                    node_cfg_save
-                    socks_vps_recipe > "${NODE_HOME}/vps-setup.txt"
-                    ui_blank; ui_ok "Datos actualizados."
+                    node_guardian_start && ui_ok "Guardian en marcha: reconecta solo si se cae."
                 fi
-                ui_pause ;;
-            7)  node_diagnose ;;
-            8)  node_check_ip ;;
-            9)  node_show_log ;;
-            10) node_screen_device; ui_pause ;;
-            12) node_screen_vps_check ;;
-            13) node_update ;;
-            11) node_remove
+                sleep 1 ;;
+            2)  node_screen_autostart ;;
+            3)  node_diagnose ;;
+            4)  node_screen_vps_data ;;
+            5)  node_screen_pubkey ;;
+            6)  node_install ;;
+            7)  node_show_log ;;
+            8)  node_update ;;
+            9)  node_screen_device; ui_pause ;;
+            10) node_remove
                 node_is_configured || return 0 ;;
-            0)  clear; return 0 ;;
+            0|"") clear; return 0 ;;
             *)  ui_err "Opcion no valida."; sleep 1 ;;
         esac
     done
@@ -2947,12 +2991,25 @@ node_main() {
         --down)
             node_cfg_load || exit 1
             node_link_down quiet; exit 0 ;;
+        --restart-guardian)
+            # Tras actualizar el codigo: si el guardian corria, se relanza
+            # para que use la version nueva. Si no corria, no se toca.
+            node_cfg_load || exit 0
+            node_guardian_is_running || exit 0
+            node_guardian_stop; sleep 1
+            if [ "$DEV_INIT" = "systemd" ] && _root_try "systemctl is-enabled --quiet wghome-node.service"; then
+                _root_try "systemctl restart wghome-node.service"
+            else
+                node_guardian_start
+            fi
+            _node_log "Guardian relanzado tras actualizar"
+            exit 0 ;;
         --status)
             node_cfg_load || { echo "sin configurar"; exit 1; }
             node_link_healthy && echo "activo (${CFG_MODE})" || echo "caido (${CFG_MODE})"
             exit 0 ;;
         --help|-h)
-            echo "Uso: bash node.sh [--guardian|--up|--down|--status]"
+            echo "Uso: bash node.sh [--guardian|--up|--down|--status|--restart-guardian]"
             exit 0 ;;
     esac
 

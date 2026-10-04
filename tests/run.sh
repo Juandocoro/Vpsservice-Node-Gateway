@@ -88,7 +88,14 @@ is "el host se relee"          "$CFG_VPS_HOST"    "203.0.113.9"
 is "el puerto se relee"        "$CFG_VPS_PORT"    "51821"
 is "la IP propia se relee"     "$NODE_SELF_WGIP"  "10.77.78.2"
 is "y arrastra su red"         "$NODE_VPS_WGIP"   "10.77.78.1"
-is "el fichero queda privado"  "$(stat -c '%a' "$NODE_CONF")" "600"
+# En NTFS (Windows) chmod no tiene efecto: la prueba solo cuenta donde
+# el sistema de archivos guarda permisos.
+touch "$TMP/perm" && chmod 600 "$TMP/perm"
+if [ "$(stat -c %a "$TMP/perm")" = "600" ]; then
+    is "el fichero queda privado"  "$(stat -c %a "$NODE_CONF")" "600"
+else
+    ok "el fichero queda privado (no comprobable aqui: sin permisos POSIX)"
+fi
 
 group "Claves"
 command -v wg >/dev/null 2>&1 || { printf "  ${D}(omitido: falta el comando wg)${C}\n"; SKIP_WG=1; }
@@ -137,6 +144,37 @@ CFG_VPS_HOST=""
 node_config_is_sane && bad "da por buena una config sin host" || ok "detecta que faltan datos del VPS"
 CFG_VPS_HOST=203.0.113.9
 node_config_is_sane && ok "acepta una config completa" || bad "rechaza una config completa"
+
+group "IP del nodo, puerto e interfaz del VPS van emparejados"
+is "nodo 1: puerto 51820"       "$(_node_port_for_ip 10.77.77.2)" "51820"
+is "nodo 2: puerto 51821"       "$(_node_port_for_ip 10.77.78.2)" "51821"
+is "nodo 5: puerto 51824"       "$(_node_port_for_ip 10.77.81.2)" "51824"
+is "nodo 1: interfaz wg-home"   "$(_node_vps_iface 10.77.77.2)"   "wg-home"
+is "nodo 2: interfaz wg-home2"  "$(_node_vps_iface 10.77.78.2)"   "wg-home2"
+_node_check_endpoint_host 10.77.78.1 >/dev/null 2>&1 \
+    && bad "acepta la IP interna del nodo 2 como host del VPS" || ok "rechaza cualquier IP interna 10.77.x.x como host"
+_node_check_endpoint_host 203.0.113.9 >/dev/null 2>&1 && ok "acepta una IP publica" || bad "rechaza una IP publica"
+
+group "Menu: cada opcion visible tiene su accion"
+SIN=$(awk '
+    /^[a-zA-Z_]+\(\) *\{/ { if (fn != "") chk(); fn = $1; delete op; delete cs; next }
+    /ui_opt(_danger)? "/ { match($0, /ui_opt(_danger)? "[^"]*"/); k = substr($0, RSTART, RLENGTH); gsub(/^ui_opt(_danger)? "|"$/, "", k); op[k] = 1 }
+    /^[ \t]*[^ \t()#]+\)/ { c = $0; sub(/^[ \t]*/, "", c); sub(/\).*/, "", c); n = split(c, al, "|")
+                           for (i = 1; i <= n; i++) { a = al[i]; gsub(/"/, "", a); cs[a] = 1 } }
+    function chk(   k) { for (k in op) if (!(k in cs)) printf " %s[%s]", fn, k }
+    END { if (fn != "") chk() }' node.sh)
+# Los submenus de eleccion (modo, claves) se leen con ui_ask, no con case.
+SIN=$(sed -E 's/ (node_install|node_install_wireguard|node_screen_autostart)\(\)\[[0-9]+\]//g' <<<"$SIN")
+[ -z "$(tr -d ' ' <<<"$SIN")" ] && ok "el menu principal no tiene opciones muertas" || bad "opciones sin accion" "$SIN"
+DUP=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' node.sh | sort | uniq -d)
+[ -z "$DUP" ] && ok "ninguna funcion definida dos veces" || bad "funciones duplicadas" "$DUP"
+
+group "El nodo se cura solo"
+grep -q 'Reenvio o NAT desaparecidos' node.sh && ok "el guardian repone el NAT y el reenvio si desaparecen" \
+    || bad "el guardian no repone el NAT"
+grep -q -- '--restart-guardian)' node.sh && grep -q 'restart-guardian' setup.sh \
+    && ok "actualizar o reinstalar relanza el guardian con el codigo nuevo" || bad "el guardian sigue con codigo viejo tras actualizar"
+is "el guardian revisa cada 15 s" "$NODE_GUARD_INTERVAL" "15"
 
 printf "\n${Y}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C}\n"
 if [ "$FAIL" -eq 0 ]; then printf " ${G}%d pruebas correctas${C}\n" "$OK"
