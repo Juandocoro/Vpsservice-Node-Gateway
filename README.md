@@ -67,28 +67,32 @@ que fuerces resolución por TCP.
 
 ### Modo A — WireGuard
 
-1. **En el VPS:** panel `menu` ▸ GATEWAY RESIDENCIAL ▸ `[1]` instalar,
-   luego `[5]` para ver su clave pública.
-2. **En el nodo:** `nodo` ▸ `[1]` configurar. Pega IP del VPS, puerto (51820)
-   y esa clave pública.
+1. **En el VPS:** panel `menu` ▸ IP RESIDENCIAL ▸ AVANZADO ▸ INSTALAR (una vez),
+   y en AVANZADO ▸ CLAVE PÚBLICA DEL VPS copia su clave.
+2. **En el nodo:** `nodo` ▸ `[1]` configurar. Pega la IP del VPS, la IP de este
+   nodo (10.77.77.2 si es el primero; el puerto se propone solo a partir de ella)
+   y la clave pública del VPS.
 3. El nodo te muestra **su** clave pública.
-4. **En el VPS:** `[6]` REGISTRAR CLAVE DEL PC, pega la clave del nodo.
+4. **En el VPS:** IP RESIDENCIAL ▸ NODOS ▸ REGISTRAR NODO PC y pega esa clave. El
+   panel te dice la IP y el puerto que le asignó; si no coinciden con los del
+   paso 2, reconfigura el nodo con esos.
 5. **En el nodo:** `[2]` para conectar.
-6. **En el VPS:** `[8]` elegir usuarios y `[3]` activar la salida residencial.
-7. Comprueba: `[8]` en el nodo y `[11]` en el VPS deben mostrar la misma IP.
+6. **En el VPS:** ASIGNAR USUARIOS y enciende la SALIDA RESIDENCIAL.
+7. Comprueba: `[8]` en el nodo y IP RESIDENCIAL ▸ DIAGNÓSTICO en el VPS deben
+   mostrar la misma IP.
 
 ### Modo B — SOCKS inverso
 
 Con el panel (recomendado). El lado del VPS lo monta el panel; aquí solo se
 genera la llave.
 
-1. **En el VPS:** panel `menu` ▸ GATEWAY RESIDENCIAL ▸ GESTIONAR NODOS ▸
-   REGISTRAR NODO MOVIL. Reserva el nodo y te muestra el **usuario** (`snodeN`)
+1. **En el VPS:** panel `menu` ▸ IP RESIDENCIAL ▸ NODOS ▸
+   REGISTRAR NODO MÓVIL. Reserva el nodo y te muestra el **usuario** (`snodeN`)
    y el **puerto SOCKS** (`1108N`) exactos.
 2. **En el nodo:** `nodo` ▸ `[1]`. Introduce el host, el puerto SSH y — muy
    importante — el **mismo usuario y puerto SOCKS que muestra el panel**. El
    nodo genera su clave SSH y muestra su clave pública.
-3. **En el VPS:** vuelve a REGISTRAR NODO MOVIL con el mismo nombre y **pega esa
+3. **En el VPS:** vuelve a REGISTRAR NODO MÓVIL con el mismo nombre y **pega esa
    clave pública**. Asigna usuarios al nodo y enciende la salida residencial.
 4. **En el nodo:** `[2]` para conectar.
 

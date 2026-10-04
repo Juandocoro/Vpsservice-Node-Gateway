@@ -1322,6 +1322,17 @@ nat_on() {
     _root_run "ip rule show 2>/dev/null" 2>/dev/null | grep -q "to ${NODE_SUBNET} lookup main" || \
         _root_try "ip rule add to ${NODE_SUBNET} lookup main priority ${NODE_RULE_PRIO_BACK}"
 
+    # firewalld (Fedora y derivadas) tiene su propia cadena nftables, y
+    # un ACCEPT en la de iptables no la salta: el reenvio se descartaba
+    # igual y el nodo salia "conectado" pero sin dar Internet.
+    if _root_run "firewall-cmd --state 2>/dev/null" 2>/dev/null | grep -q running; then
+        _root_try "firewall-cmd --zone=trusted --add-interface=${NODE_IFACE}"
+        _root_try "firewall-cmd --permanent --zone=trusted --add-interface=${NODE_IFACE}"
+        _root_try "firewall-cmd --add-masquerade"
+        _root_try "firewall-cmd --permanent --add-masquerade"
+        [ -z "$quiet" ] && ui_info "firewalld: ${NODE_IFACE} en la zona trusted y masquerade activo."
+    fi
+
     _node_log "NAT activado hacia ${up} (tabla ${tbl})"
     [ -z "$quiet" ] && ui_ok "Salida a Internet compartida con el VPS."
     return 0
@@ -1981,7 +1992,7 @@ node_install_wireguard() {
     CFG_VPS_PORT="$NODE_DEFAULT_PORT"
     ui_blank
     echo -e "${UI_PAD}${DM}Datos del VPS. Los encuentras en el panel:${CR}"
-    echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL ▸ [5] CLAVE PUBLICA DEL VPS${CR}"
+    echo -e "${UI_PAD}${DM}IP RESIDENCIAL ▸ NODOS ▸ DATOS PARA EL NODO${CR}"
     ui_blank
 
     until ui_ask "IP publica o dominio del VPS" "$CFG_VPS_HOST"; \
@@ -1990,18 +2001,13 @@ node_install_wireguard() {
         [ -z "$CFG_VPS_HOST" ] && { ui_err "Sin host no hay nodo."; ui_pause; return 1; }
     done
 
-    ui_ask "Puerto WireGuard del VPS" "$NODE_DEFAULT_PORT"
-    CFG_VPS_PORT="$REPLY_UI"
-
-    ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"
-    CFG_VPS_PUBKEY="$REPLY_UI"
-
-    # Con varios nodos registrados el VPS reparte una IP a cada uno y
-    # la enseña al darlos de alta. Poner otra rompe el enrutado.
+    # Primero la IP y despues el puerto: van emparejados (nodo N =
+    # 10.77.(76+N).2 y puerto 51819+N), asi que el puerto se propone
+    # solo a partir de la IP. Antes se pedia al reves y era facil
+    # dejar el 51820 con la IP del nodo 2: el tunel no conectaba.
     ui_blank
-    echo -e "${UI_PAD}${DM}El VPS asigna una IP a cada nodo al registrarlo${CR}"
-    echo -e "${UI_PAD}${DM}(GESTIONAR NODOS te la muestra). Si solo hay uno,${CR}"
-    echo -e "${UI_PAD}${DM}deja el valor por defecto.${CR}"
+    echo -e "${UI_PAD}${DM}El VPS asigna una IP a cada nodo al registrarlo. Si solo${CR}"
+    echo -e "${UI_PAD}${DM}hay uno, deja el valor por defecto.${CR}"
     ui_ask "IP de este nodo en el tunel" "${NODE_SELF_WGIP}"
     case "$REPLY_UI" in
         10.77.*) NODE_SELF_WGIP="$REPLY_UI" ;;
@@ -2009,13 +2015,22 @@ node_install_wireguard() {
     esac
     CFG_SELF_IP="$NODE_SELF_WGIP"
     _node_derive_net
-    ui_blank
-    ui_info "Red de este nodo: ${NODE_SUBNET} — VPS en ${NODE_VPS_WGIP}"
-    if [ "$CFG_VPS_PORT" = "$NODE_DEFAULT_PORT" ] && [ "$NODE_SELF_WGIP" != "10.77.77.2" ]; then
-        ui_warn "Ojo: no eres el primer nodo pero el puerto sigue siendo ${NODE_DEFAULT_PORT}."
-        echo -e "${UI_PAD}${DM}   Cada nodo tiene el suyo (51821, 51822...). Mira el${CR}"
-        echo -e "${UI_PAD}${DM}   panel del VPS: GESTIONAR NODOS te dice cual.${CR}"
+
+    local oct3 sugerido
+    oct3=$(echo "$NODE_SELF_WGIP" | cut -d. -f3)
+    sugerido="$NODE_DEFAULT_PORT"
+    [[ "$oct3" =~ ^[0-9]+$ ]] && [ "$oct3" -ge 77 ] && sugerido=$(( 51820 + oct3 - 77 ))
+    ui_ask "Puerto WireGuard del VPS" "$sugerido"
+    CFG_VPS_PORT="$REPLY_UI"
+    if [ "$CFG_VPS_PORT" != "$sugerido" ]; then
+        ui_warn "Para la IP ${NODE_SELF_WGIP} el panel usa el puerto ${sugerido}."
+        ui_confirm "¿Usar ${CFG_VPS_PORT} de todos modos?" "n" || CFG_VPS_PORT="$sugerido"
     fi
+
+    ui_ask "Clave publica del VPS" "$CFG_VPS_PUBKEY"
+    CFG_VPS_PUBKEY="$REPLY_UI"
+    ui_blank
+    ui_info "Red de este nodo: ${NODE_SUBNET} — VPS en ${NODE_VPS_WGIP}, puerto ${CFG_VPS_PORT}"
     if ! echo "$CFG_VPS_PUBKEY" | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
         ui_warn "Esa clave no tiene el formato base64 de 44 caracteres."
         ui_confirm "¿Continuar igualmente?" "n" || { ui_pause; return 1; }
@@ -2080,14 +2095,14 @@ node_install_socks() {
     CFG_VPS_PORT="$REPLY_UI"
 
     # IMPORTANTE: el usuario y el puerto SOCKS NO son libres si usas el
-    # panel. Al hacer "GESTIONAR NODOS > REGISTRAR NODO MOVIL" el panel
+    # panel. Al hacer "IP RESIDENCIAL > NODOS > REGISTRAR NODO MÓVIL" el panel
     # reserva el nodo y te muestra el usuario (snodeN) y el puerto SOCKS
     # exactos que hay que poner aqui. Si no coinciden, el movil publica
     # el SOCKS en un puerto y el VPS lo busca en otro: no habra internet.
     ui_blank
     ui_warn "Usa el usuario y el puerto SOCKS que te muestra el PANEL"
-    echo -e "${UI_PAD}${DM}   (VPS: GATEWAY RESIDENCIAL > GESTIONAR NODOS >${CR}"
-    echo -e "${UI_PAD}${DM}    REGISTRAR NODO MOVIL). Suelen ser snodeN y 1108N.${CR}"
+    echo -e "${UI_PAD}${DM}   (VPS: IP RESIDENCIAL > NODOS >${CR}"
+    echo -e "${UI_PAD}${DM}    REGISTRAR NODO MÓVIL). Suelen ser snodeN y 1108N.${CR}"
     ui_blank
 
     ui_ask "Usuario SSH que indica el panel (ej: snode1)" "${CFG_SSH_USER}"
@@ -2112,7 +2127,7 @@ node_install_socks() {
     ui_ok "Clave SSH del nodo generada."
     ui_blank
     echo -e "${UI_PAD}${YL}Registrala en el PANEL del VPS:${CR}"
-    echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL > GESTIONAR NODOS > REGISTRAR NODO MOVIL${CR}"
+    echo -e "${UI_PAD}${DM}IP RESIDENCIAL > NODOS > REGISTRAR NODO MÓVIL${CR}"
     echo -e "${UI_PAD}${DM}(con el mismo nombre) y pega esta clave publica:${CR}"
     ui_blank
     echo -e "${UI_PAD}${WH}$(cat "${NODE_SSH_KEY}.pub" 2>/dev/null)${CR}"
@@ -2125,7 +2140,7 @@ node_install_socks() {
 node_show_pubkey_inline() {
     ui_blank
     echo -e "${UI_PAD}${YL}Registra esta clave en el VPS:${CR}"
-    echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL ▸ [6] REGISTRAR CLAVE DEL PC${CR}"
+    echo -e "${UI_PAD}${DM}IP RESIDENCIAL ▸ NODOS ▸ REGISTRAR NODO PC${CR}"
     ui_blank
     echo -e "${UI_PAD}${WH}$(cat "$NODE_PUB" 2>/dev/null)${CR}"
     ui_blank
@@ -2146,7 +2161,7 @@ node_screen_vps_check() {
         echo -e "${UI_PAD}${DM}El panel del VPS trae un diagnostico que prueba ESTE${CR}"
         echo -e "${UI_PAD}${DM}metodo salto a salto (incluida una salida real por el${CR}"
         echo -e "${UI_PAD}${DM}movil). Alli lo ves todo:${CR}"
-        echo -e "${UI_PAD}${WH}   GATEWAY RESIDENCIAL > DIAGNOSTICO${CR}"
+        echo -e "${UI_PAD}${WH}   IP RESIDENCIAL > DIAGNÓSTICO${CR}"
         ui_blank
         ui_rule
         echo -e "${UI_PAD}${YL}Lo que TIENE que cuadrar entre nodo y panel:${CR}"
@@ -2164,7 +2179,7 @@ node_screen_vps_check() {
         echo -e "${UI_PAD}${YL}2 · ¿Esta redsocks vivo?${CR}"
         echo -e "${UI_PAD}${WH}   systemctl status 'redsocks-node*'${CR}"
         echo -e "${UI_PAD}${YL}3 · ¿Esta encendida la salida residencial?${CR}"
-        echo -e "${UI_PAD}${DM}   En el panel: GATEWAY RESIDENCIAL, salida ACTIVA, y el${CR}"
+        echo -e "${UI_PAD}${DM}   En el panel: IP RESIDENCIAL, salida ACTIVA, y el${CR}"
         echo -e "${UI_PAD}${DM}   usuario asignado a este nodo.${CR}"
         ui_blank
         ui_warn "El SOCKS transporta solo TCP: el DNS (UDP) resuelve en el"
@@ -2189,7 +2204,7 @@ node_screen_vps_check() {
     echo -e "${UI_PAD}${WH}   sudo wg show ${NODE_IFACE}${CR}"
     echo -e "${UI_PAD}${DM}   Si dice \"Unable to access interface\", el VPS no lo ha${CR}"
     echo -e "${UI_PAD}${DM}   arrancado. Instalarlo solo lo deja habilitado, no en${CR}"
-    echo -e "${UI_PAD}${DM}   marcha: en el panel, GATEWAY RESIDENCIAL > [2].${CR}"
+    echo -e "${UI_PAD}${DM}   marcha: en el panel, IP RESIDENCIAL > AVANZADO > TÚNEL.${CR}"
     ui_blank
 
     echo -e "${UI_PAD}${YL}2 · ¿Escucha en el puerto?${CR}"
@@ -2241,8 +2256,8 @@ node_screen_pubkey() {
         socks_paths
         if [ -f "${NODE_SSH_KEY}.pub" ]; then
             echo -e "${UI_PAD}${YL}Registrala en el PANEL del VPS:${CR}"
-            echo -e "${UI_PAD}${DM}GATEWAY RESIDENCIAL > GESTIONAR NODOS >${CR}"
-            echo -e "${UI_PAD}${DM}REGISTRAR NODO MOVIL, y pega esta clave:${CR}"
+            echo -e "${UI_PAD}${DM}IP RESIDENCIAL > NODOS >${CR}"
+            echo -e "${UI_PAD}${DM}REGISTRAR NODO MÓVIL, y pega esta clave:${CR}"
             ui_blank
             echo -e "${UI_PAD}${WH}$(cat "${NODE_SSH_KEY}.pub")${CR}"
             ui_blank
@@ -2264,7 +2279,7 @@ node_screen_pubkey() {
         if [ -f "$NODE_PUB" ]; then
             ui_row2 "Este nodo" "$NODE_SELF_WGIP" "VPS" "$NODE_VPS_WGIP"
             ui_blank
-            echo -e "${UI_PAD}${DM}Panel del VPS ▸ GATEWAY RESIDENCIAL ▸ [6]${CR}"
+            echo -e "${UI_PAD}${DM}Panel del VPS ▸ IP RESIDENCIAL ▸ NODOS ▸ REGISTRAR NODO PC${CR}"
             ui_blank
             echo -e "${UI_PAD}${WH}$(cat "$NODE_PUB")${CR}"
             ui_blank
@@ -2419,7 +2434,7 @@ node_diagnose() {
                 ui_warn "Reglas instaladas pero con CERO paquetes."
                 echo -e "${UI_PAD}${DM}   El tunel esta vivo y las reglas puestas, pero el VPS${CR}"
                 echo -e "${UI_PAD}${DM}   no esta mandando trafico. Falta activarlo alli:${CR}"
-                echo -e "${UI_PAD}${DM}   · GESTIONAR NODOS > CAMBIAR SALIDA -> este nodo${CR}"
+                echo -e "${UI_PAD}${DM}   · IP RESIDENCIAL > ASIGNAR USUARIOS -> este nodo${CR}"
                 echo -e "${UI_PAD}${DM}   · SALIDA RESIDENCIAL -> encender${CR}"
                 echo -e "${UI_PAD}${DM}   · CONFIGURAR USUARIOS -> elegir quien sale por aqui${CR}"
             fi
@@ -2458,7 +2473,7 @@ node_check_ip() {
     ui_blank
     ui_rule
     echo -e "${UI_PAD}${DM}Esta debe ser la misma que muestra el panel del VPS${CR}"
-    echo -e "${UI_PAD}${DM}en GATEWAY RESIDENCIAL ▸ [11] VER IP DE SALIDA${CR}"
+    echo -e "${UI_PAD}${DM}en IP RESIDENCIAL ▸ DIAGNÓSTICO (salida real)${CR}"
     echo -e "${UI_PAD}${DM}cuando la salida residencial esta activada.${CR}"
     ui_solid
     ui_pause
