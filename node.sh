@@ -1410,13 +1410,17 @@ socks_check_ssh_version() {
 
 socks_ssh_cmd() {
     socks_paths
+    # ServerAlive 10s x 3: un movil cambia de red a menudo, y con 25s
+    # tardaba ~75 s en darse cuenta de que el tunel estaba muerto. El
+    # VPS (panel VPSService) libera el puerto en ~30 s con ClientAlive,
+    # asi que reconectar antes no choca con el puerto aun ocupado.
     # -v no es ruido gratuito: es la unica forma de saber que el
     # reenvio remoto quedo realmente publicado. Sin ese dato solo
     # sabriamos que el proceso vive, que no es lo mismo.
     echo "ssh -v -N -T -i ${NODE_SSH_KEY} -p ${CFG_VPS_PORT} \
 -o ExitOnForwardFailure=yes \
 -o ConnectTimeout=15 \
--o ServerAliveInterval=25 \
+-o ServerAliveInterval=10 \
 -o ServerAliveCountMax=3 \
 -o StrictHostKeyChecking=accept-new \
 -o UserKnownHostsFile=${NODE_HOME}/known_hosts \
@@ -1497,6 +1501,17 @@ socks_vps_recipe() {
 # =========================================================
 # LADO VPS — modo SOCKS (sin root en el nodo)
 # Ejecutar en el VPS como root, una sola vez.
+# =========================================================
+#
+#   !!! SI TU VPS USA EL PANEL VPSService, NO EJECUTES ESTO !!!
+#
+# El panel ya lo hace: Gateway residencial > Nodos > Registrar
+# nodo movil (o Configuracion > [B] Movil sin root). Esta receta
+# desvia la marca 0x77, que en el panel es la del NODO 1, y
+# mandaria a los usuarios de ese nodo por este movil; ademas
+# activa un redsocks global que el panel apaga y guarda reglas
+# viejas con netfilter-persistent que vuelven en cada arranque.
+# Es solo para un VPS sin el panel.
 # =========================================================
 
 # 1) Autorizar la clave del nodo
@@ -1609,6 +1624,9 @@ node_link_healthy() {
 # interfaz de salida cambia de nombre.
 # =========================================================
 NODE_GUARD_INTERVAL="30"
+# En modo SOCKS revisar es gratis (mirar si vive un proceso) y cada
+# segundo sin tunel son clientes sin la IP del movil: 10 s.
+NODE_GUARD_INTERVAL_SOCKS="10"
 
 node_guardian_loop() {
     # En un movil con root se instalan dos vias de arranque —Termux:Boot
@@ -1654,7 +1672,8 @@ node_guardian_loop() {
                 last_uplink="$up"
             fi
         fi
-        sleep "$NODE_GUARD_INTERVAL"
+        if [ "$CFG_MODE" = "socks" ]; then sleep "$NODE_GUARD_INTERVAL_SOCKS"
+        else sleep "$NODE_GUARD_INTERVAL"; fi
     done
 }
 

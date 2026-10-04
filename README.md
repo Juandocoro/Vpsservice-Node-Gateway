@@ -96,6 +96,11 @@ genera la llave.
 > Si no, el móvil publica el SOCKS en un puerto y el VPS lo busca en otro: el
 > túnel conecta pero no hay internet.
 
+**Si el VPS usa el panel VPSService no ejecutes esa receta**: el panel ya lo hace,
+y la receta desvía la marca del nodo 1. Para un celular sin root, el panel tiene
+además **Configuración → [B] Móvil sin root (beta)**, que no necesita este proyecto:
+genera la llave en el VPS y da un solo bloque para pegar en Termux.
+
 Sin panel (manual). El nodo deja una receta en `<config>/vps-setup.txt` (también
 en `[5]`) que instala `redsocks` y las reglas en el VPS a mano. **No la ejecutes
 si usas el panel:** crearía reglas que chocan con las suyas.
