@@ -176,6 +176,20 @@ grep -q -- '--restart-guardian)' node.sh && grep -q 'restart-guardian' setup.sh 
     && ok "actualizar o reinstalar relanza el guardian con el codigo nuevo" || bad "el guardian sigue con codigo viejo tras actualizar"
 is "el guardian revisa cada 15 s" "$NODE_GUARD_INTERVAL" "15"
 
+group "Permisos: que un chmod no bloquee la actualizacion"
+# node.sh estaba guardado sin permiso de ejecucion; el instalador le
+# hacia 'chmod +x', git lo tomaba como cambio local y toda
+# actualizacion abortaba mientras el menu decia "Actualizado".
+SINX=$(git ls-files -s '*.sh' 2>/dev/null | awk '$1!="100755"{printf " %s", $4}')
+[ -z "$SINX" ] && ok "los .sh estan guardados como ejecutables" \
+    || bad "hay .sh sin permiso de ejecucion en el repositorio" "$SINX"
+grep -q 'config core.fileMode false' node.sh && grep -q 'config core.fileMode false' setup.sh \
+    && ok "actualizar e instalar hacen que git ignore los permisos" \
+    || bad "falta desactivar core.fileMode"
+grep -q 'reset --hard' node.sh \
+    && ok "si el pull falla, la actualizacion se pone al dia igualmente" \
+    || bad "un pull fallido deja el nodo sin actualizar"
+
 printf "\n${Y}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C}\n"
 if [ "$FAIL" -eq 0 ]; then printf " ${G}%d pruebas correctas${C}\n" "$OK"
 else printf " ${G}%d correctas${C}  ${R}%d fallidas${C}\n" "$OK" "$FAIL"
